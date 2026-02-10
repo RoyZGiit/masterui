@@ -31,6 +31,10 @@ class TerminalViewCache {
         view.optionAsMetaKey = true
         view.nativeBackgroundColor = NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedWhite: 0.9, alpha: 1.0)
+        
+        // Enable clipboard integration
+        view.allowMouseReporting = false // Disable mouse reporting so standard selection works better
+        // view.enableOSC52 = true          // SwiftTerm 1.2.0 might not expose this property publicly yet
 
         // Build environment
         var env = ProcessInfo.processInfo.environment
@@ -145,6 +149,29 @@ class MasterUITerminalView: LocalProcessTerminalView {
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
         idleCoordinator?.resetIdleTimer()
+    }
+    
+    // Enable standard copy command
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) {
+            if event.charactersIgnoringModifiers == "c" {
+                // Pass an empty string or self as sender instead of nil, or use a method that doesn't require it
+                // SwiftTerm's copy() expects (Any?)
+                copy(self)
+                return true
+            } else if event.charactersIgnoringModifiers == "v" {
+                paste(self)
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    
+    // Ensure paste uses the correct pasteboard handling
+    override func paste(_ sender: Any?) {
+        if let string = NSPasteboard.general.string(forType: .string) {
+            send(txt: string)
+        }
     }
 }
 

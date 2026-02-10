@@ -18,12 +18,7 @@ struct PanelContentView: View {
             case .settings:
                 SettingsView()
             case .chat:
-                // Conversation area
-                if let targetID = appState.selectedTargetID {
-                    ConversationView(conversation: appState.conversation(for: targetID))
-                } else {
-                    emptyState
-                }
+                EmptyView()
             case .cliSessions:
                 CLILayoutView(sessionManager: appState.cliSessionManager)
             }
@@ -47,16 +42,10 @@ struct PanelContentView: View {
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .onTapGesture {
-                    appState.viewMode = .chat
-                }
 
             Text("MasterUI")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.primary)
-
-            // Mode toggle: Chat / Terminal
-            modeToggle
 
             Spacer()
 
@@ -86,61 +75,32 @@ struct PanelContentView: View {
                 statusIndicator
             }
 
-            // Settings Toggle (not shown in CLI mode since CLI has its own toolbar)
-            if appState.viewMode != .cliSessions {
-                Button(action: {
-                    withAnimation(.snappy) {
-                        if appState.viewMode == .settings {
-                            appState.viewMode = .chat
-                        } else {
-                            appState.viewMode = .settings
-                        }
+            // Settings Toggle
+            Button(action: {
+                withAnimation(.snappy) {
+                    if appState.viewMode == .settings {
+                        appState.viewMode = .cliSessions
+                    } else {
+                        appState.viewMode = .settings
                     }
-                }) {
-                    Image(systemName: appState.viewMode == .settings ? "xmark.circle.fill" : "gearshape.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help(appState.viewMode == .settings ? "Close Settings" : "Open Settings")
+            }) {
+                Image(systemName: appState.viewMode == .settings ? "xmark.circle.fill" : "gearshape.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .help(appState.viewMode == .settings ? "Close Settings" : "Open Settings")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            NotificationCenter.default.post(name: .togglePanelMaximize, object: nil)
+        }
     }
 
     // MARK: - Mode Toggle
-
-    private var modeToggle: some View {
-        HStack(spacing: 2) {
-            modeButton(icon: "bubble.left.fill", mode: .chat, label: "Chat")
-            modeButton(icon: "terminal.fill", mode: .cliSessions, label: "Terminal")
-        }
-        .padding(2)
-        .background(.quaternary.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    private func modeButton(icon: String, mode: ViewMode, label: String) -> some View {
-        Button(action: {
-            withAnimation(.snappy) {
-                appState.viewMode = mode
-            }
-        }) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10))
-                Text(label)
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(appState.viewMode == mode ? Color.accentColor.opacity(0.2) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(appState.viewMode == mode ? .primary : .secondary)
-    }
 
     // MARK: - Status Indicator
 

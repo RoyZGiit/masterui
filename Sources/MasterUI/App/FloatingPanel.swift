@@ -34,26 +34,29 @@ class FloatingPanel: NSPanel {
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         // Floating behavior
-        level = .floating
-        isFloatingPanel = true
+        level = .normal
+        isFloatingPanel = false
         hidesOnDeactivate = false
+        
+        // Ensure standard window behavior
+        isReleasedWhenClosed = false
 
         // Appearance
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         backgroundColor = .clear
         isOpaque = false
 
         // Show on all spaces
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        
         // Animation
         animationBehavior = .utilityWindow
 
@@ -103,6 +106,7 @@ class FloatingPanel: NSPanel {
 
 extension Notification.Name {
     static let newCLISession = Notification.Name("MasterUI.newCLISession")
+    static let togglePanelMaximize = Notification.Name("MasterUI.togglePanelMaximize")
 }
 
 // MARK: - FloatingPanelController
@@ -113,8 +117,26 @@ class FloatingPanelController: ObservableObject {
     private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
 
+    init() {
+        NotificationCenter.default.publisher(for: .togglePanelMaximize)
+            .sink { [weak self] _ in
+                self?.toggleMaximize()
+            }
+            .store(in: &cancellables)
+    }
+
     var isPanelVisible: Bool {
         panel?.isVisible ?? false
+    }
+
+    private var lastToggleTime: Date = .distantPast
+
+    func toggleMaximize() {
+        let now = Date()
+        guard now.timeIntervalSince(lastToggleTime) > 0.5 else { return }
+        lastToggleTime = now
+
+        panel?.zoom(nil)
     }
 
     func togglePanel() {
@@ -137,14 +159,9 @@ class FloatingPanelController: ObservableObject {
         let layout: PanelLayout = appState.viewMode == .cliSessions ? .terminal : .chat
         panel.minSize = layout.minSize
 
-        // Fill the screen (visible area)
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            panel.setFrame(screenFrame, display: true)
-        }
-
-        panel.makeKeyAndOrderFront(nil)
+        // Ensure app is active before ordering window to front
         NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     func hidePanel() {
@@ -156,6 +173,11 @@ class FloatingPanelController: ObservableObject {
 
         let newSize = layout.defaultSize
         panel.minSize = layout.minSize
+
+        // If zoomed, don't force resize to default
+        if panel.isZoomed {
+            return
+        }
 
         // Keep center position during resize
         let currentFrame = panel.frame

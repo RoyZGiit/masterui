@@ -9,8 +9,15 @@ class AppState: ObservableObject {
 
     // MARK: - Published State
 
-    /// All configured AI targets.
+    /// All configured AI targets (derived from CLI configs).
     @Published var targets: [AITarget] = []
+
+    /// Whether CLI tools are enabled.
+    @Published var cliEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(cliEnabled, forKey: "cliEnabled")
+        }
+    }
 
     /// Currently selected target for sending messages.
     @Published var selectedTargetID: UUID?
@@ -35,37 +42,48 @@ class AppState: ObservableObject {
 
     // MARK: - Private
 
-    private let userDefaultsKey = "masterui_targets"
+    private let configFileURL: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".masterui_config.json")
+    }()
+
     private let connectorManager = ConnectorManager.shared
 
     // MARK: - Init
 
     private init() {
-        loadTargets()
-        if targets.isEmpty {
-            // Load presets on first launch
-            targets = PresetTargets.all
-            saveTargets()
+        // Load cliEnabled from UserDefaults (default true)
+        self.cliEnabled = UserDefaults.standard.object(forKey: "cliEnabled") as? Bool ?? true
+
+        let configs = loadCLIConfigs()
+        if configs.isEmpty {
+            // First launch — generate defaults and save
+            let defaults = PresetTargets.defaultCLIConfigs()
+            saveCLIConfigs(defaults)
+            targets = aiTargets(from: defaults)
         } else {
-            // Merge any new presets that were added since last launch
-            mergeNewPresets()
+            targets = aiTargets(from: configs)
         }
-        // Select first enabled target
+
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
     }
 
-    /// Add any preset targets that don't exist yet (by name match).
-    private func mergeNewPresets() {
-        let existingNames = Set(targets.map { $0.name })
-        var added = false
-        for preset in PresetTargets.all {
-            if !existingNames.contains(preset.name) {
-                targets.append(preset)
-                added = true
-            }
-        }
-        if added {
-            saveTargets()
+    // MARK: - CLIToolConfig <-> AITarget conversion
+
+    /// Convert CLIToolConfigs to AITargets, enriching with preset metadata.
+    func aiTargets(from configs: [CLIToolConfig]) -> [AITarget] {
+        return configs.map { config in
+            let meta = PresetTargets.metadata(for: config.name)
+            return AITarget(
+                name: config.name,
+                type: .cliTool,
+                executablePath: config.path,
+                arguments: config.args,
+                workingDirectory: config.workdir,
+                iconSymbol: meta?.icon ?? "terminal.fill",
+                colorHex: meta?.color ?? "#4ECDC4",
+                installationGuide: meta?.installGuide
+            )
         }
     }
 
@@ -80,30 +98,21 @@ class AppState: ObservableObject {
         targets.filter { $0.isEnabled }
     }
 
-    func addTarget(_ target: AITarget) {
-        targets.append(target)
-        saveTargets()
-    }
-
-    func removeTarget(id: UUID) {
-        targets.removeAll { $0.id == id }
-        conversations.removeValue(forKey: id)
-        connectorManager.removeConnector(for: id)
-        if selectedTargetID == id {
-            selectedTargetID = enabledTargets.first?.id
-        }
-        saveTargets()
-    }
-
     func updateTarget(_ target: AITarget) {
         if let index = targets.firstIndex(where: { $0.id == target.id }) {
             targets[index] = target
-            saveTargets()
         }
     }
 
     func selectTarget(_ id: UUID) {
         selectedTargetID = id
+    }
+
+    /// Apply new CLI configs: save to disk and rebuild targets.
+    func applyCLIConfigs(_ configs: [CLIToolConfig]) {
+        saveCLIConfigs(configs)
+        targets = aiTargets(from: configs)
+        selectedTargetID = targets.first(where: { $0.isEnabled })?.id
     }
 
     // MARK: - Conversation
@@ -159,7 +168,7 @@ class AppState: ObservableObject {
         if !success {
             await MainActor.run {
                 conv.updateLastAssistantMessage(
-                    content: "⚠️ Failed to send message. Make sure \(target.name) is running and MasterUI has accessibility permissions.",
+                    content: "Failed to send message. Make sure \(target.name) is running and MasterUI has accessibility permissions.",
                     isStreaming: false
                 )
             }
@@ -177,18 +186,49 @@ class AppState: ObservableObject {
 
     // MARK: - Persistence
 
-    private func saveTargets() {
-        if let data = try? JSONEncoder().encode(targets) {
-            UserDefaults.standard.set(data, forKey: userDefaultsKey)
+    func saveCLIConfigs(_ configs: [CLIToolConfig]) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        if let data = try? encoder.encode(configs) {
+            try? data.write(to: configFileURL)
         }
     }
 
-    private func loadTargets() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey),
-              let decoded = try? JSONDecoder().decode([AITarget].self, from: data) else {
-            return
+    func loadCLIConfigs() -> [CLIToolConfig] {
+        guard let data = try? Data(contentsOf: configFileURL) else { return [] }
+
+        // Try new format first
+        if let configs = try? JSONDecoder().decode([CLIToolConfig].self, from: data) {
+            return configs
         }
-        targets = decoded
+
+        // Backward compat: migrate from old [AITarget] format
+        if let oldTargets = try? JSONDecoder().decode([AITarget].self, from: data) {
+            let configs = oldTargets
+                .filter { $0.type == .cliTool }
+                .map { CLIToolConfig(name: $0.name, path: $0.executablePath, args: $0.arguments, workdir: $0.workingDirectory) }
+            // Save migrated format
+            saveCLIConfigs(configs)
+            return configs
+        }
+
+        return []
+    }
+
+    /// Generate default config JSON text from presets.
+    func defaultConfigJSON() -> String {
+        let configs = PresetTargets.defaultCLIConfigs()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        if let data = try? encoder.encode(configs),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        return "[]"
+    }
+
+    var configFilePath: String {
+        return configFileURL.path
     }
 }
 

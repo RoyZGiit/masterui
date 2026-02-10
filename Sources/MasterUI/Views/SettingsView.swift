@@ -2,17 +2,16 @@ import SwiftUI
 
 // MARK: - SettingsView
 
-/// The settings interface for managing AI targets and app preferences.
+/// The settings interface with CLI toggle + JSON editor.
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var selectedTab: SettingsTab = .targets
-    @State private var showAddSheet = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
             targetsTab
                 .tabItem {
-                    Label("AI Targets", systemImage: "list.bullet")
+                    Label("CLI Tools", systemImage: "terminal")
                 }
                 .tag(SettingsTab.targets)
 
@@ -29,179 +28,222 @@ struct SettingsView: View {
                 .tag(SettingsTab.about)
         }
         .frame(minWidth: 550, minHeight: 400)
-        .sheet(isPresented: $showAddSheet) {
-            AddServiceSheet()
-                .environmentObject(appState)
-        }
     }
 
     // MARK: - Targets Tab
 
+    @State private var jsonConfigText: String = ""
+    @State private var jsonValidationStatus: JSONValidationStatus = .empty
+    @State private var hasUnsavedChanges: Bool = false
+
     private var targetsTab: some View {
         VStack(spacing: 0) {
-            // Header
+            // Toggle
             HStack {
-                Text("Configured AI Targets")
-                    .font(.headline)
+                Toggle("Enable CLI Tools", isOn: $appState.cliEnabled)
+                    .toggleStyle(.switch)
                 Spacer()
-                Button(action: { showAddSheet = true }) {
-                    Label("Add Target", systemImage: "plus")
-                }
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
             Divider()
 
-            // Target list
-            List {
-                ForEach(appState.targets) { target in
-                    TargetRow(target: target)
+            // JSON Editor
+            VStack(spacing: 0) {
+                HStack {
+                    Text("CLI Tool Configuration")
+                        .font(.headline)
+                    Spacer()
+                    Text("File: \(appState.configFilePath)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
                 }
-                .onDelete { indexSet in
-                    for index in indexSet {
-                        appState.removeTarget(id: appState.targets[index].id)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+
+                JSONTextEditor(
+                    text: $jsonConfigText,
+                    onTextChange: {
+                        validateJSON()
+                        hasUnsavedChanges = true
+                    },
+                    onTextDidEndEditing: {
+                        formatJSONIfValid()
+                    },
+                    onSaveCommand: {
+                        saveConfig()
+                    },
+                    onFormatCommand: {
+                        formatJSONIfValid()
                     }
-                }
-                .onMove { from, to in
-                    appState.targets.move(fromOffsets: from, toOffset: to)
-                }
+                )
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 16)
             }
 
             Divider()
+                .padding(.top, 8)
 
-            // Accessibility status
-            accessibilityStatus
+            // Status + Actions
+            HStack(spacing: 12) {
+                // Validation status
+                switch jsonValidationStatus {
+                case .valid(let count):
+                    Label("\(count) tool(s) configured", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                case .error(let message):
+                    Label(message, systemImage: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                case .empty:
+                    Label("Enter JSON configuration", systemImage: "info.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("Reset to Defaults") {
+                    jsonConfigText = appState.defaultConfigJSON()
+                    validateJSON()
+                    hasUnsavedChanges = true
+                }
+                .controlSize(.small)
+
+                Button("Format JSON") {
+                    formatJSONIfValid()
+                }
+                .controlSize(.small)
+                .disabled(jsonConfigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Cmd+Shift+F")
+
+                Button("Save & Apply") {
+                    saveConfig()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!canSave)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .onAppear {
+            loadConfigForEditing()
         }
     }
 
-    // MARK: - Target Row
-
-    private struct TargetRow: View {
-        let target: AITarget
-        @EnvironmentObject var appState: AppState
-        @State private var isExpanded = false
-
-        var body: some View {
-            DisclosureGroup(isExpanded: $isExpanded) {
-                targetDetails
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: target.iconSymbol)
-                        .foregroundStyle(Color(hex: target.colorHex) ?? .accentColor)
-                        .frame(width: 24)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 4) {
-                            Text(target.name)
-                                .font(.system(size: 13, weight: .medium))
-                            if target.type == .cliTool {
-                                Text("CLI")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Color.orange.opacity(0.15))
-                                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                                    .foregroundStyle(.orange)
-                            }
-                        }
-                        Text(target.type == .cliTool ? target.executablePath : target.bundleID)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    if target.type == .guiApp {
-                        let isRunning = AccessibilityService.shared.isAppRunning(bundleID: target.bundleID)
-                        Circle()
-                            .fill(isRunning ? Color.green : Color.gray)
-                            .frame(width: 8, height: 8)
-                    } else {
-                        let execExists = FileManager.default.isExecutableFile(atPath: target.executablePath)
-                        Circle()
-                            .fill(execExists ? Color.blue : Color.gray)
-                            .frame(width: 8, height: 8)
-                            .help(execExists ? "Executable found" : "Executable not found")
-                    }
-
-                    Toggle("", isOn: Binding(
-                        get: { target.isEnabled },
-                        set: { newValue in
-                            var updated = target
-                            updated.isEnabled = newValue
-                            appState.updateTarget(updated)
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                }
-            }
+    private var canSave: Bool {
+        if case .valid = jsonValidationStatus {
+            return hasUnsavedChanges
         }
+        return false
+    }
 
-        private var targetDetails: some View {
-            VStack(alignment: .leading, spacing: 8) {
-                // Send method
-                HStack {
-                    Text("Send Method:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { target.sendMethod },
-                        set: { newValue in
-                            var updated = target
-                            updated.sendMethod = newValue
-                            appState.updateTarget(updated)
-                        }
-                    )) {
-                        ForEach(SendMethod.allCases, id: \.self) { method in
-                            Text(method.rawValue).tag(method)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 250)
-                }
-
-                // Element locator status
-                HStack(spacing: 16) {
-                    locatorStatus("Input", target.inputLocator)
-                    locatorStatus("Output", target.outputLocator)
-                }
-
-                // Pick elements button
-                Button(action: {
-                    appState.pickerTargetID = target.id
-                    appState.pickerStep = .selectInput
-                    appState.isPickingElement = true
-                }) {
-                    Label("Pick Elements", systemImage: "scope")
-                }
-                .controlSize(.small)
-                .help("Interactively select input/output elements in the target app")
-
-                // Debug: dump AX tree
-                Button(action: {
-                    let tree = ElementFinder.shared.dumpTree(bundleID: target.bundleID)
-                    print(tree)
-                }) {
-                    Label("Dump AX Tree (Console)", systemImage: "ladybug")
-                }
-                .controlSize(.small)
-                .foregroundStyle(.secondary)
-            }
-            .padding(.leading, 36)
-            .padding(.vertical, 4)
+    private func loadConfigForEditing() {
+        let configs = appState.loadCLIConfigs()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        if let data = try? encoder.encode(configs),
+           let text = String(data: data, encoding: .utf8) {
+            jsonConfigText = text
+        } else {
+            jsonConfigText = appState.defaultConfigJSON()
         }
+        validateJSON()
+        hasUnsavedChanges = false
+    }
 
-        private func locatorStatus(_ label: String, _ locator: ElementLocator) -> some View {
-            HStack(spacing: 4) {
-                Image(systemName: locator.isConfigured ? "checkmark.circle.fill" : "xmark.circle")
-                    .foregroundStyle(locator.isConfigured ? .green : .orange)
-                    .font(.system(size: 11))
-                Text("\(label): \(locator.role ?? "auto")")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+    private func validateJSON() {
+        if jsonConfigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            jsonValidationStatus = .empty
+            return
         }
+        do {
+            let configs = try parseConfigs(from: jsonConfigText)
+            jsonValidationStatus = .valid(count: configs.count)
+        } catch {
+            jsonValidationStatus = .error(error.localizedDescription)
+        }
+    }
+
+    private func parseConfigs(from text: String) throws -> [CLIToolConfig] {
+        guard let data = text.data(using: .utf8) else {
+            throw JSONEditorError.invalidEncoding
+        }
+        do {
+            _ = try JSONSerialization.jsonObject(with: data, options: [])
+        } catch let syntaxError as NSError {
+            let message = syntaxError.localizedDescription
+            throw JSONEditorError.invalidSyntax("Invalid JSON syntax: \(message)")
+        }
+        do {
+            return try JSONDecoder().decode([CLIToolConfig].self, from: data)
+        } catch let decodingError as DecodingError {
+            throw JSONEditorError.schemaError(readableDecodingError(decodingError))
+        } catch {
+            throw JSONEditorError.schemaError("Schema mismatch: \(error.localizedDescription)")
+        }
+    }
+
+    private func readableDecodingError(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            return "Missing required key '\(key.stringValue)' at \(codingPathString(context.codingPath))"
+        case .typeMismatch(_, let context):
+            return "Type mismatch at \(codingPathString(context.codingPath)): \(context.debugDescription)"
+        case .valueNotFound(_, let context):
+            return "Missing value at \(codingPathString(context.codingPath)): \(context.debugDescription)"
+        case .dataCorrupted(let context):
+            return "Invalid value at \(codingPathString(context.codingPath)): \(context.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private func codingPathString(_ path: [CodingKey]) -> String {
+        if path.isEmpty { return "root" }
+        return path.map { key in
+            if let index = key.intValue {
+                return "[\(index)]"
+            }
+            return key.stringValue
+        }
+        .joined(separator: ".")
+        .replacingOccurrences(of: ".[", with: "[")
+    }
+
+    private func formatJSONIfValid() {
+        guard case .valid = jsonValidationStatus else { return }
+        guard let data = jsonConfigText.data(using: .utf8) else { return }
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data, options: []),
+            let formattedData = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+            let formattedText = String(data: formattedData, encoding: .utf8)
+        else {
+            return
+        }
+        guard formattedText != jsonConfigText else { return }
+        jsonConfigText = formattedText
+        hasUnsavedChanges = true
+        validateJSON()
+    }
+
+    private func saveConfig() {
+        formatJSONIfValid()
+        guard let configs = try? parseConfigs(from: jsonConfigText) else {
+            return
+        }
+        appState.applyCLIConfigs(configs)
+        hasUnsavedChanges = false
+        validateJSON()
     }
 
     // MARK: - Shortcuts Tab
@@ -266,36 +308,35 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity)
     }
-
-    // MARK: - Accessibility Status
-
-    private var accessibilityStatus: some View {
-        HStack(spacing: 8) {
-            let hasPermission = PermissionsManager.shared.hasAccessibilityPermission
-            Image(systemName: hasPermission ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                .foregroundStyle(hasPermission ? .green : .orange)
-
-            Text(hasPermission ? "Accessibility access granted" : "Accessibility access required")
-                .font(.system(size: 12))
-                .foregroundColor(hasPermission ? .secondary : .orange)
-
-            Spacer()
-
-            if !hasPermission {
-                Button("Open Settings") {
-                    PermissionsManager.shared.openAccessibilitySettings()
-                }
-                .controlSize(.small)
-            }
-        }
-        .padding()
-    }
 }
 
-// MARK: - SettingsTab
+// MARK: - Supporting Types
 
 enum SettingsTab {
     case targets
     case shortcuts
     case about
+}
+
+enum JSONValidationStatus {
+    case valid(count: Int)
+    case error(String)
+    case empty
+}
+
+enum JSONEditorError: LocalizedError {
+    case invalidEncoding
+    case invalidSyntax(String)
+    case schemaError(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidEncoding:
+            return "Invalid UTF-8 encoding"
+        case .invalidSyntax(let message):
+            return message
+        case .schemaError(let message):
+            return "Invalid config structure: \(message)"
+        }
+    }
 }

@@ -155,11 +155,6 @@ struct NewCLISessionSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedTarget: AITarget?
-    @State private var customName = ""
-    @State private var customPath = ""
-    @State private var customArgs = ""
-    @State private var customWorkDir = ""
-    @State private var useCustom = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -176,58 +171,57 @@ struct NewCLISessionSheet: View {
             Divider()
 
             // Content
-            Form {
-                Section("From Presets") {
-                    ForEach(sessionManager.availableCLITargets) { target in
-                        HStack {
-                            Image(systemName: target.iconSymbol)
-                                .foregroundStyle(Color(hex: target.colorHex) ?? Color.accentColor)
-                                .frame(width: 24)
-                            VStack(alignment: .leading) {
-                                Text(target.name)
-                                    .font(.system(size: 13, weight: .medium))
+            List {
+                ForEach(sessionManager.availableCLITargets) { target in
+                    HStack {
+                        Image(systemName: target.iconSymbol)
+                            .foregroundStyle(Color(hex: target.colorHex) ?? Color.accentColor)
+                            .frame(width: 24)
+                        VStack(alignment: .leading) {
+                            Text(target.name)
+                                .font(.system(size: 13, weight: .medium))
+
+                            let isInstalled = FileManager.default.isExecutableFile(atPath: target.executablePath)
+                            if isInstalled {
                                 Text(target.executablePath)
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if selectedTarget?.id == target.id && !useCustom {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(Color.accentColor)
+                            } else {
+                                Text("Not Installed")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.red)
                             }
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedTarget = target
-                            useCustom = false
+                        Spacer()
+
+                        let isInstalled = FileManager.default.isExecutableFile(atPath: target.executablePath)
+                        if !isInstalled {
+                            Button("Install Info") {
+                                alertTargetName = target.name
+                                alertInstallCommand = target.installationGuide ?? "Please check official documentation."
+                                showInstallAlert = true
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        } else if selectedTarget?.id == target.id {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
-
-                    if sessionManager.availableCLITargets.isEmpty {
-                        Text("No CLI targets configured. Add one in Settings or use custom below.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if FileManager.default.isExecutableFile(atPath: target.executablePath) {
+                            selectedTarget = target
+                        }
                     }
                 }
 
-                Section("Custom") {
-                    Toggle("Use custom command", isOn: $useCustom)
-                    if useCustom {
-                        TextField("Name", text: $customName)
-                            .textFieldStyle(.roundedBorder)
-                        TextField("Executable Path", text: $customPath)
-                            .textFieldStyle(.roundedBorder)
-                            .help("e.g., /usr/local/bin/claude")
-                        TextField("Arguments", text: $customArgs)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Space-separated")
-                        TextField("Working Directory", text: $customWorkDir)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Optional")
-                    }
+                if sessionManager.availableCLITargets.isEmpty {
+                    Text("No CLI tools configured. Add tools in Settings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .formStyle(.grouped)
 
             Divider()
 
@@ -235,40 +229,31 @@ struct NewCLISessionSheet: View {
             HStack {
                 Spacer()
                 Button("Create") {
-                    createSession()
+                    if let target = selectedTarget {
+                        sessionManager.createSession(for: target)
+                    }
                     dismiss()
                 }
                 .keyboardShortcut(.return, modifiers: [])
-                .disabled(!canCreate)
+                .disabled(selectedTarget == nil)
                 .buttonStyle(.borderedProminent)
             }
             .padding()
         }
-        .frame(width: 450, height: 500)
-    }
-
-    private var canCreate: Bool {
-        if useCustom {
-            return !customName.isEmpty && !customPath.isEmpty
-        }
-        return selectedTarget != nil
-    }
-
-    private func createSession() {
-        if useCustom {
-            let args = customArgs.split(separator: " ").map(String.init)
-            let target = AITarget(
-                name: customName,
-                type: .cliTool,
-                executablePath: customPath,
-                arguments: args,
-                workingDirectory: customWorkDir.isEmpty ? nil : customWorkDir,
-                iconSymbol: "terminal.fill",
-                colorHex: "#4ECDC4"
-            )
-            sessionManager.createSession(for: target)
-        } else if let target = selectedTarget {
-            sessionManager.createSession(for: target)
+        .frame(width: 450, height: 400)
+        .alert("Install \(alertTargetName)", isPresented: $showInstallAlert) {
+            Button("Copy Command") {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(alertInstallCommand, forType: .string)
+            }
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Run this command in your terminal:\n\n\(alertInstallCommand)")
         }
     }
+
+    @State private var showInstallAlert = false
+    @State private var alertTargetName = ""
+    @State private var alertInstallCommand = ""
 }

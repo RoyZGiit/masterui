@@ -11,7 +11,8 @@ class CLISessionManager: ObservableObject {
 
     /// Available CLI targets the user can create sessions for.
     var availableCLITargets: [AITarget] {
-        AppState.shared.targets.filter { $0.type == .cliTool && $0.isEnabled }
+        guard AppState.shared.cliEnabled else { return [] }
+        return AppState.shared.targets.filter { $0.type == .cliTool && $0.isEnabled }
     }
 
     // MARK: - Session Lifecycle
