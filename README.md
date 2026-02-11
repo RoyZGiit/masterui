@@ -6,15 +6,6 @@ Press `Cmd+Shift+Space` to open a Spotlight-style terminal window. Pick a tool �
 <img width="3840" height="1970" alt="1" src="https://github.com/user-attachments/assets/163b49e4-3a1b-49d0-bc50-c6dfe36c7c49" />
 <img width="3840" height="1970" alt="2" src="https://github.com/user-attachments/assets/5d8bce81-1d2d-4241-a37e-655733592886" />
 
-## ClI
-
-- **Global Hotkey** — `Cmd+Shift+Space` to toggle the floating panel from anywhere
-- **Side-by-Side Sessions** — Run multiple CLI tools simultaneously with a sidebar for switching
-- **Real Terminal** — Full PTY emulation: colors, cursor movement, interactive prompts all work
-- **JSON Config** — Add any CLI tool by editing a simple JSON file in Settings
-- **Auto-Detect** — Built-in presets for popular tools, auto-detected from common install paths
-- **Lightweight** — Menu bar only, no dock icon
-
 ## Built-in Presets
 
 | Tool | Install |
