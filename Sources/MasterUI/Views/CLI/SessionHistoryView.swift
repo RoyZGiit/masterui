@@ -7,21 +7,21 @@ struct SessionHistoryView: View {
     @ObservedObject var session: CLISession
 
     var body: some View {
-        if session.history.turns.isEmpty {
+        if session.history.blocks.isEmpty {
             emptyState
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(session.history.turns) { turn in
-                            TurnView(turn: turn)
-                                .id(turn.id)
+                        ForEach(session.history.blocks) { block in
+                            HistoryBlockView(block: block)
+                                .id(block.id)
                         }
                     }
                     .padding(16)
                 }
-                .onChange(of: session.history.turns.count) {
-                    if let last = session.history.turns.last {
+                .onChange(of: session.history.blocks.count) {
+                    if let last = session.history.blocks.last {
                         withAnimation {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
@@ -51,55 +51,51 @@ struct SessionHistoryView: View {
     }
 }
 
-// MARK: - TurnView
+// MARK: - HistoryBlockView
 
-/// Renders a single turn: user input bubble + assistant output bubble.
-private struct TurnView: View {
-    let turn: SessionTurn
+/// Renders a single history block with sender and timestamp metadata.
+private struct HistoryBlockView: View {
+    let block: SessionBlock
 
     private var timeString: String {
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm"
-        return fmt.string(from: turn.timestamp)
+        return fmt.string(from: block.timestamp)
+    }
+
+    private var senderLabel: String {
+        block.role == .user ? "You" : "Assistant"
+    }
+
+    private var contentFont: Font {
+        block.role == .user ? .system(size: 12) : .system(size: 12, design: .monospaced)
+    }
+
+    private var bubbleColor: Color {
+        block.role == .user
+            ? Color.accentColor.opacity(0.1)
+            : Color(nsColor: .controlBackgroundColor).opacity(0.5)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // User input
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("You")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(timeString)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                }
-
-                Text(turn.input)
-                    .font(.system(size: 12))
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-
-            // Assistant output
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Assistant")
+            HStack {
+                Text(senderLabel)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-
-                Text(turn.output)
-                    .font(.system(size: 12, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                Spacer()
+                Text(timeString)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
             }
+
+            Text(block.content)
+                .font(contentFont)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(bubbleColor)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 }

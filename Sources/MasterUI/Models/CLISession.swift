@@ -61,22 +61,35 @@ class CLISession: ObservableObject, Identifiable {
                 workingDirectory: target.workingDirectory,
                 createdAt: Date(),
                 updatedAt: Date(),
-                turns: []
+                blocks: []
             )
         }
     }
 
-    /// Append a captured turn (user input + cleaned output) to the history.
-    func appendTurn(input: String, output: String) {
-        let turn = SessionTurn(
-            timestamp: Date(),
-            input: input,
-            output: output
+    /// Append a block and return its id so later output can update the same block.
+    @discardableResult
+    func appendBlock(role: SessionRole, content: String, timestamp: Date = Date()) -> UUID {
+        let block = SessionBlock(
+            role: role,
+            timestamp: timestamp,
+            content: content
         )
-        history.turns.append(turn)
+        history.blocks.append(block)
         history.updatedAt = Date()
+        SessionHistoryStore.shared.save(history)
+        return block.id
+    }
 
-        // Persist immediately
+    /// Replace the content of an existing block.
+    func updateBlockContent(blockID: UUID, content: String) {
+        guard let idx = history.blocks.firstIndex(where: { $0.id == blockID }) else { return }
+        history.blocks[idx] = SessionBlock(
+            id: history.blocks[idx].id,
+            role: history.blocks[idx].role,
+            timestamp: history.blocks[idx].timestamp,
+            content: content
+        )
+        history.updatedAt = Date()
         SessionHistoryStore.shared.save(history)
     }
 }

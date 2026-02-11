@@ -16,26 +16,17 @@ struct CLILayoutView: View {
                 .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
 
             // Right: Terminal area
-            VStack(spacing: 0) {
-                if let session = sessionManager.focusedSession {
-                    // Terminal toolbar with tab picker
-                    terminalToolbar(for: session)
-                    Divider()
-                    // Content area: Terminal or History
-                    if session.activeTab == .history {
-                        SessionHistoryView(session: session)
-                    } else {
-                        EnhancedTerminalViewWrapper(
-                            session: session,
-                            onStateChange: { newState in
-                                handleStateChange(sessionID: session.id, state: newState)
-                            }
-                        )
-                        .id(session.id)
-                    }
-                } else {
-                    noSessionView
-                }
+            if let session = sessionManager.focusedSession {
+                SessionContentView(
+                    session: session,
+                    onStateChange: { sessionID, state in
+                        handleStateChange(sessionID: sessionID, state: state)
+                    },
+                    onTerminate: { terminateSession($0) },
+                    onNewSession: { showNewSessionSheet = true }
+                )
+            } else {
+                noSessionView
             }
         }
         .sheet(isPresented: $showNewSessionSheet) {
@@ -44,65 +35,6 @@ struct CLILayoutView: View {
         .onReceive(NotificationCenter.default.publisher(for: .newCLISession)) { _ in
             showNewSessionSheet = true
         }
-    }
-
-    // MARK: - Terminal Toolbar
-
-    private func terminalToolbar(for session: CLISession) -> some View {
-        HStack(spacing: 8) {
-            // Session icon + state
-            Circle()
-                .fill(stateColor(for: session.state))
-                .frame(width: 8, height: 8)
-
-            Text(session.title)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-
-            if session.state == .waitingForInput {
-                Text("waiting for input")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
-
-            Spacer()
-
-            // Tab picker: Terminal / History
-            Picker("", selection: Binding(
-                get: { session.activeTab },
-                set: { session.activeTab = $0 }
-            )) {
-                Text("Terminal").tag(SessionTab.terminal)
-                Text("History").tag(SessionTab.history)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 160)
-
-            // Quick actions
-            if session.state != .exited {
-                Button(action: { terminateSession(session) }) {
-                    Image(systemName: "stop.circle")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Terminate process")
-            }
-
-            Button(action: { showNewSessionSheet = true }) {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("New Session (Cmd+T)")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
     }
 
     // MARK: - Empty State
@@ -151,6 +83,102 @@ struct CLILayoutView: View {
         // The terminal view wrapper handles termination through the NSView
         // For now we just close the session from our manager
         sessionManager.closeSession(session.id)
+    }
+
+}
+
+// MARK: - SessionContentView
+
+/// Extracted per-session content view that properly observes the CLISession.
+/// This ensures tab switching and history updates trigger re-renders.
+private struct SessionContentView: View {
+    @ObservedObject var session: CLISession
+    var onStateChange: (UUID, SessionState) -> Void
+    var onTerminate: (CLISession) -> Void
+    var onNewSession: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Terminal toolbar with tab picker
+            toolbar
+            Divider()
+            // Content area: Terminal or History
+            if session.activeTab == .history {
+                SessionHistoryView(session: session)
+            } else {
+                EnhancedTerminalViewWrapper(
+                    session: session,
+                    onStateChange: { newState in
+                        onStateChange(session.id, newState)
+                    }
+                )
+                .id(session.id)
+            }
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(stateColor(for: session.state))
+                .frame(width: 8, height: 8)
+
+            Text(session.title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+
+            if session.state == .waitingForInput {
+                Text("waiting for input")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+
+            Spacer()
+
+            // Tab picker: Terminal / History
+            Picker("", selection: Binding(
+                get: { session.activeTab },
+                set: { newTab in
+                    // Flush pending turn before switching to history
+                    if newTab == .history {
+                        if let termView = TerminalViewCache.shared.terminalView(for: session.id) {
+                            termView.idleCoordinator?.flushPendingTurn(force: true)
+                        }
+                    }
+                    session.activeTab = newTab
+                }
+            )) {
+                Text("Terminal").tag(SessionTab.terminal)
+                Text("History").tag(SessionTab.history)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 160)
+
+            // Quick actions
+            if session.state != .exited {
+                Button(action: { onTerminate(session) }) {
+                    Image(systemName: "stop.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Terminate process")
+            }
+
+            Button(action: onNewSession) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("New Session (Cmd+T)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     private func stateColor(for state: SessionState) -> Color {

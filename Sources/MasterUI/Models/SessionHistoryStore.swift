@@ -1,13 +1,21 @@
 import Foundation
 
-// MARK: - SessionTurn
+// MARK: - SessionRole
 
-/// A single turn in a CLI session: one user input + the model's final output.
-struct SessionTurn: Codable, Identifiable {
+/// Author of a single history block.
+enum SessionRole: String, Codable {
+    case user
+    case assistant
+}
+
+// MARK: - SessionBlock
+
+/// A single block in a CLI session history.
+struct SessionBlock: Codable, Identifiable {
     var id: UUID = UUID()
+    let role: SessionRole
     let timestamp: Date
-    let input: String
-    let output: String
+    let content: String
 }
 
 // MARK: - SessionHistory
@@ -19,7 +27,73 @@ struct SessionHistory: Codable {
     let workingDirectory: String?
     let createdAt: Date
     var updatedAt: Date
-    var turns: [SessionTurn]
+    var blocks: [SessionBlock]
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case targetName
+        case workingDirectory
+        case createdAt
+        case updatedAt
+        case blocks
+        case turns
+    }
+
+    /// Legacy persisted format: one item includes both user input and assistant output.
+    private struct LegacySessionTurn: Codable {
+        let id: UUID?
+        let timestamp: Date
+        let input: String
+        let output: String
+    }
+
+    init(
+        sessionID: UUID,
+        targetName: String,
+        workingDirectory: String?,
+        createdAt: Date,
+        updatedAt: Date,
+        blocks: [SessionBlock]
+    ) {
+        self.sessionID = sessionID
+        self.targetName = targetName
+        self.workingDirectory = workingDirectory
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.blocks = blocks
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        targetName = try container.decode(String.self, forKey: .targetName)
+        workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+
+        if let decodedBlocks = try container.decodeIfPresent([SessionBlock].self, forKey: .blocks) {
+            blocks = decodedBlocks
+            return
+        }
+
+        let legacyTurns = try container.decodeIfPresent([LegacySessionTurn].self, forKey: .turns) ?? []
+        blocks = legacyTurns.flatMap { turn in
+            [
+                SessionBlock(role: .user, timestamp: turn.timestamp, content: turn.input),
+                SessionBlock(role: .assistant, timestamp: turn.timestamp, content: turn.output),
+            ]
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(targetName, forKey: .targetName)
+        try container.encodeIfPresent(workingDirectory, forKey: .workingDirectory)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(blocks, forKey: .blocks)
+    }
 }
 
 // MARK: - SessionHistoryStore

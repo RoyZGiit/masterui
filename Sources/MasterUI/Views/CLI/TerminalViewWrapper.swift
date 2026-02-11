@@ -25,6 +25,7 @@ class TerminalViewCache {
         let view = MasterUITerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
         view.processDelegate = coordinator
         view.idleCoordinator = coordinator
+        coordinator.terminalView = view
 
         // Appearance
         view.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -86,10 +87,35 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     // MARK: - History Capture State
 
-    /// The user input pending to be paired with model output.
+    /// Latest user input. Used to filter possible terminal input echo.
     var pendingInput: String?
-    /// Accumulated raw output bytes since the last user input.
+    /// Accumulated raw output bytes since the last user input (fallback).
     private var outputBuffer = Data()
+    /// Reference to the terminal view for reading the buffer directly.
+    weak var terminalView: MasterUITerminalView?
+    /// The scroll-invariant row where the current turn's output starts.
+    private var outputStartRow: Int = 0
+    /// Current assistant block being updated while output streams in.
+    private var activeAssistantBlockID: UUID?
+
+    /// Move output start row to the line after current cursor so consumed text
+    /// is not re-read and appended repeatedly on later idle flushes.
+    private func advanceOutputStartRowPastCursor() {
+        guard let view = terminalView else { return }
+        let terminal = view.getTerminal()
+        let topRow = terminal.getTopVisibleRow()
+        let cursorY = terminal.getCursorLocation().y
+        outputStartRow = max(0, topRow + cursorY + 1)
+    }
+
+    /// Finalize the current assistant block when terminal returns to prompt
+    /// (i.e. it's waiting for next user input).
+    private func markTurnBoundaryAtPrompt() {
+        activeAssistantBlockID = nil
+        pendingInput = nil
+        outputBuffer = Data()
+        advanceOutputStartRowPastCursor()
+    }
 
     init(session: CLISession, onStateChange: ((SessionState) -> Void)?) {
         self.session = session
@@ -115,7 +141,7 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         // Flush any pending turn before marking as exited
-        flushPendingTurn()
+        flushPendingTurn(force: true)
 
         DispatchQueue.main.async {
             self.session.state = .exited
@@ -137,59 +163,135 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     /// When the user presses Enter, commit the previous turn (if any)
     /// and start a new one with the given input.
     func commitInputLine(_ input: String) {
-        // Flush previous pending turn first
-        flushPendingTurn()
+        // Capture any final assistant text before starting the next user block.
+        flushPendingTurn(force: true)
 
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // Start a new user block.
+        if Thread.isMainThread {
+            _ = session.appendBlock(role: .user, content: trimmed)
+        } else {
+            DispatchQueue.main.async {
+                _ = self.session.appendBlock(role: .user, content: trimmed)
+            }
+        }
+
         pendingInput = trimmed
         outputBuffer = Data()
+        activeAssistantBlockID = nil
+
+        // Record where the output will start (the line after the current input line).
+        if let view = terminalView {
+            let terminal = view.getTerminal()
+            let topRow = terminal.getTopVisibleRow()
+            let cursorY = terminal.getCursorLocation().y
+            outputStartRow = topRow + cursorY + 1
+        }
     }
 
     /// Flush the pending turn into session history.
     /// Called when idle is detected or when a new input line arrives.
-    func flushPendingTurn() {
-        guard let input = pendingInput else { return }
-
-        let rawOutput = String(data: outputBuffer, encoding: .utf8) ?? ""
-        let cleaned = ANSICleaner.clean(rawOutput)
-
-        if !cleaned.isEmpty {
-            DispatchQueue.main.async {
-                self.session.appendTurn(input: input, output: cleaned)
+    ///
+    /// - Parameter force: true when user switched tab or process is exiting.
+    func flushPendingTurn(force: Bool = false) {
+        // Ignore process startup noise before the first user input.
+        if pendingInput == nil && activeAssistantBlockID == nil {
+            if force {
+                outputBuffer = Data()
+                advanceOutputStartRowPastCursor()
             }
+            return
         }
 
-        pendingInput = nil
+        let sanitized = currentSanitizedOutput()
+        guard !sanitized.isEmpty else {
+            if force {
+                outputBuffer = Data()
+                advanceOutputStartRowPastCursor()
+            }
+            return
+        }
+
+        upsertAssistantBlock(with: sanitized)
         outputBuffer = Data()
+
+        if force {
+            // On explicit flush, consume current region so next update only reads new rows.
+            advanceOutputStartRowPastCursor()
+        }
     }
 
     // MARK: - Idle Detection
 
     func resetIdleTimer() {
-        idleTimer?.invalidate()
-        idleTimer = Timer.scheduledTimer(withTimeInterval: idleThreshold, repeats: false) { [weak self] _ in
+        // Timer setup must happen on main thread to ensure the run loop fires them.
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // When idle is detected, flush the pending turn
-            self.flushPendingTurn()
+            self.idleTimer?.invalidate()
 
-            DispatchQueue.main.async {
+            // Short idle (2s): update UI state and flush the pending turn.
+            // This captures the AI output between two user inputs as soon as
+            // the terminal goes idle (i.e. the AI is waiting for the next prompt).
+            self.idleTimer = Timer.scheduledTimer(withTimeInterval: self.idleThreshold, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
                 if self.session.state == .running {
                     self.session.state = .waitingForInput
                     self.session.lastActivityDate = Date()
                     self.onStateChange?(.waitingForInput)
+                    self.flushPendingTurn(force: true)
+                    self.markTurnBoundaryAtPrompt()
                 }
             }
-        }
 
-        // Mark as running when data is flowing
-        DispatchQueue.main.async {
+            // Mark as running when data is flowing
             if self.session.state != .running && self.session.state != .exited {
                 self.session.state = .running
                 self.onStateChange?(.running)
             }
             self.session.lastActivityDate = Date()
+
+            // Keep updating the same assistant block while output is streaming.
+            self.flushPendingTurn()
+        }
+    }
+
+    /// Build sanitized output snapshot for the current assistant block.
+    private func currentSanitizedOutput() -> String {
+        var cleaned = ""
+        if let view = terminalView {
+            cleaned = view.getBufferText(fromRow: outputStartRow)
+        }
+        if cleaned.isEmpty {
+            let rawOutput = String(data: outputBuffer, encoding: .utf8) ?? ""
+            cleaned = ANSICleaner.clean(rawOutput)
+        }
+        return HistoryOutputCleaner.cleanAssistantOutput(cleaned, pendingInput: pendingInput)
+    }
+
+    /// Create or update the active assistant block.
+    private func upsertAssistantBlock(with content: String) {
+        if let blockID = activeAssistantBlockID {
+            if Thread.isMainThread {
+                session.updateBlockContent(blockID: blockID, content: content)
+            } else {
+                DispatchQueue.main.async {
+                    self.session.updateBlockContent(blockID: blockID, content: content)
+                }
+            }
+            return
+        }
+
+        if Thread.isMainThread {
+            activeAssistantBlockID = session.appendBlock(role: .assistant, content: content)
+            pendingInput = nil
+        } else {
+            DispatchQueue.main.async {
+                self.activeAssistantBlockID = self.session.appendBlock(role: .assistant, content: content)
+                self.pendingInput = nil
+            }
         }
     }
 }
@@ -261,6 +363,49 @@ enum ANSICleaner {
     }
 }
 
+// MARK: - HistoryOutputCleaner
+
+/// Cleans terminal output before persisting it as assistant history.
+/// Removes lines that are likely user-input echo to prevent role confusion.
+enum HistoryOutputCleaner {
+    static func cleanAssistantOutput(_ text: String, pendingInput: String?) -> String {
+        let input = pendingInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty else { return "" }
+
+        let lines = text.components(separatedBy: .newlines)
+        var filtered: [String] = []
+        filtered.reserveCapacity(lines.count)
+
+        for rawLine in lines {
+            let line = rawLine.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+            if shouldDropAsInputEcho(line: line, pendingInput: input) {
+                continue
+            }
+            filtered.append(line)
+        }
+
+        while filtered.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            filtered.removeFirst()
+        }
+        while filtered.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            filtered.removeLast()
+        }
+
+        return filtered.joined(separator: "\n")
+    }
+
+    private static func shouldDropAsInputEcho(line: String, pendingInput: String) -> Bool {
+        guard !pendingInput.isEmpty else { return false }
+
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // Keep prompt-prefixed lines (e.g. "$ cmd") intact.
+        // Only drop pure input echo lines equal to the user's input.
+        return trimmed == pendingInput
+    }
+}
+
 // MARK: - MasterUITerminalView
 
 /// Custom subclass of LocalProcessTerminalView that hooks into data received
@@ -271,6 +416,34 @@ class MasterUITerminalView: LocalProcessTerminalView {
     /// Buffer for the current line being typed by the user.
     private var inputLineBuffer: String = ""
 
+    /// Read text content from the terminal buffer starting at the given scroll-invariant row
+    /// up to the current cursor position. This reads the already-rendered text from SwiftTerm's
+    /// buffer, bypassing the need to parse raw ANSI byte streams.
+    func getBufferText(fromRow startRow: Int) -> String {
+        let terminal = getTerminal()
+        let topRow = terminal.getTopVisibleRow()
+        let cursorY = terminal.getCursorLocation().y
+        let currentRow = topRow + cursorY
+
+        let start = max(0, startRow)
+        guard start <= currentRow else { return "" }
+
+        var lines: [String] = []
+        for row in start...currentRow {
+            if let bufLine = terminal.getScrollInvariantLine(row: row) {
+                let text = bufLine.translateToString(trimRight: true)
+                lines.append(text)
+            }
+        }
+
+        // Trim trailing empty lines
+        while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            lines.removeLast()
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
         idleCoordinator?.resetIdleTimer()
@@ -279,11 +452,14 @@ class MasterUITerminalView: LocalProcessTerminalView {
 
     /// Intercept all data sent from terminal to PTY to track user input.
     /// This is called for every keystroke and paste operation.
-    override func send(source: Terminal, data: ArraySlice<UInt8>) {
-        // Parse user-sent bytes to track input
-        for byte in data {
+    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        let bytes = Array(data)
+
+        if bytes.count == 1 {
+            // Single byte: handle control characters and printable ASCII
+            let byte = bytes[0]
             switch byte {
-            case 0x0D: // CR (Enter)
+            case 0x0D, 0x0A: // CR/LF (Enter)
                 idleCoordinator?.commitInputLine(inputLineBuffer)
                 inputLineBuffer = ""
             case 0x7F, 0x08: // DEL, BS (Backspace)
@@ -297,8 +473,24 @@ class MasterUITerminalView: LocalProcessTerminalView {
             case 0x20...0x7E: // Printable ASCII
                 inputLineBuffer.append(Character(UnicodeScalar(byte)))
             default:
-                // Multi-byte UTF-8 or control chars — append printable UTF-8 later if needed
-                break
+                break // Other control characters
+            }
+        } else if bytes.first != 0x1B, let str = String(bytes: bytes, encoding: .utf8) {
+            // Multi-byte UTF-8 text (Chinese, emoji, etc.) or pasted text.
+            // Escape sequences (starting with 0x1B) are ignored for input tracking.
+            for char in str {
+                if char == "\r" || char == "\n" {
+                    idleCoordinator?.commitInputLine(inputLineBuffer)
+                    inputLineBuffer = ""
+                } else if let ascii = char.asciiValue {
+                    // ASCII: only append printable range
+                    if ascii >= 0x20 && ascii < 0x7F {
+                        inputLineBuffer.append(char)
+                    }
+                } else {
+                    // Non-ASCII: Chinese, emoji, etc.
+                    inputLineBuffer.append(char)
+                }
             }
         }
 

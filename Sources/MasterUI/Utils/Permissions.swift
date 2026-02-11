@@ -7,11 +7,26 @@ import ApplicationServices
 class PermissionsManager {
     static let shared = PermissionsManager()
 
+    /// Whether the system prompt has already been shown this launch.
+    private var hasPromptedThisLaunch = false
+
     private init() {}
 
     /// Whether the app currently has accessibility permission.
     var hasAccessibilityPermission: Bool {
         AXIsProcessTrusted()
+    }
+
+    /// Ensure accessibility permission is available, prompting only once per launch if needed.
+    /// Call this lazily when an accessibility feature is first used—not on app startup.
+    @discardableResult
+    func ensureAccessibility() -> Bool {
+        if hasAccessibilityPermission { return true }
+        if !hasPromptedThisLaunch {
+            hasPromptedThisLaunch = true
+            promptForAccessibility()
+        }
+        return false
     }
 
     /// Check accessibility permission and prompt user to grant it if not available.

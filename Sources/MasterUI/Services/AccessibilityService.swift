@@ -13,7 +13,9 @@ class AccessibilityService {
     // MARK: - App Element
 
     /// Get the AXUIElement for a running application by its bundle ID.
+    /// Lazily prompts for accessibility permission if not yet granted.
     func appElement(bundleID: String) -> AXUIElement? {
+        guard PermissionsManager.shared.ensureAccessibility() else { return nil }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
             return nil
         }

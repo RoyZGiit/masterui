@@ -73,8 +73,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set up main menu (required for standard editing shortcuts in NSTextView)
         setupMainMenu()
 
-        // Check accessibility permissions
-        PermissionsManager.shared.checkAndRequestAccessibility()
+        // Check accessibility permissions (silently – only log, don't prompt on launch).
+        // The system prompt will be shown lazily when an accessibility feature is first used.
+        if !PermissionsManager.shared.hasAccessibilityPermission {
+            print("[MasterUI] Accessibility permission not granted. Will prompt when needed.")
+        }
 
         // Set up the floating panel
         panelController = FloatingPanelController()

@@ -240,9 +240,10 @@ class CursorConnector: AppConnectorProtocol {
             return nil 
         }
 
-        let text = accessibilityService.readAllText(lastBubble, maxDepth: 10)
-        print("[CursorConnector] Read text from ID-based bubble (len=\(text.count))")
-        return text
+        let rawText = accessibilityService.readAllText(lastBubble, maxDepth: 10)
+        let text = sanitizeResponseText(rawText)
+        print("[CursorConnector] Read text from ID-based bubble (raw=\(rawText.count), clean=\(text.count))")
+        return text.isEmpty ? nil : text
     }
     
     private func readLatestBubbleTextViaInputSiblings() -> String? {
@@ -264,18 +265,18 @@ class CursorConnector: AppConnectorProtocol {
         // Flatten the tree to a list of text blocks
         var textBlocks: [(AXUIElement, String)] = []
         collectTextBlocks(element, into: &textBlocks, depth: 0, maxDepth: 8)
-        
+
         // Filter out short texts and likely input boxes (usually empty or "Type a message...")
         // We want the LAST significant text block
-        
+
         for block in textBlocks.reversed() {
-            let text = block.1.trimmingCharacters(in: .whitespacesAndNewlines)
-            if text.count > 10 && !text.contains("Type a message") && !text.contains("Ask anything") {
+            let text = sanitizeResponseText(block.1)
+            if !text.isEmpty {
                  print("[CursorConnector] Found candidate text block via heuristic: \(text.prefix(30))...")
                  return text
             }
         }
-        
+
         return nil
     }
     
@@ -355,6 +356,11 @@ class CursorConnector: AppConnectorProtocol {
         }
 
         return nil
+    }
+
+    /// Keep AX text as-is (including multi-line content), only trim outer whitespace.
+    private func sanitizeResponseText(_ raw: String) -> String {
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Activate App

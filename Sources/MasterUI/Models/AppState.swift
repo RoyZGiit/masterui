@@ -136,7 +136,7 @@ class AppState: ObservableObject {
         for session in cliSessionManager.sessions {
             // Flush any pending turn via the terminal coordinator
             if let termView = TerminalViewCache.shared.terminalView(for: session.id) {
-                termView.idleCoordinator?.flushPendingTurn()
+                termView.idleCoordinator?.flushPendingTurn(force: true)
             }
             // Save history to disk
             SessionHistoryStore.shared.save(session.history)
