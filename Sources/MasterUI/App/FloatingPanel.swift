@@ -54,8 +54,8 @@ class FloatingPanel: NSPanel {
         backgroundColor = .clear
         isOpaque = false
 
-        // Show on all spaces
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Move to active space when shown, like a normal app window
+        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         
         // Animation
         animationBehavior = .utilityWindow
