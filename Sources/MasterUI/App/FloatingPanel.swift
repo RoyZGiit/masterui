@@ -5,20 +5,20 @@ import Combine
 // MARK: - PanelLayout
 
 enum PanelLayout {
-    case chat
     case terminal
+    case settings
 
     var defaultSize: NSSize {
         switch self {
-        case .chat: return NSSize(width: 520, height: 600)
         case .terminal: return NSSize(width: 1000, height: 700)
+        case .settings: return NSSize(width: 600, height: 500)
         }
     }
 
     var minSize: NSSize {
         switch self {
-        case .chat: return NSSize(width: 480, height: 400)
         case .terminal: return NSSize(width: 700, height: 500)
+        case .settings: return NSSize(width: 480, height: 400)
         }
     }
 }
@@ -61,7 +61,7 @@ class FloatingPanel: NSPanel {
         animationBehavior = .utilityWindow
 
         // Default min size
-        minSize = PanelLayout.chat.minSize
+        minSize = PanelLayout.terminal.minSize
     }
 
     /// Intercept key equivalents for terminal shortcuts (Cmd+T, Cmd+W, Cmd+1-9)
@@ -156,7 +156,7 @@ class FloatingPanelController: ObservableObject {
         guard let panel = panel else { return }
 
         // Size based on current mode
-        let layout: PanelLayout = appState.viewMode == .cliSessions ? .terminal : .chat
+        let layout: PanelLayout = appState.viewMode == .cliSessions ? .terminal : .settings
         panel.minSize = layout.minSize
 
         // Ensure app is active before ordering window to front
@@ -255,7 +255,7 @@ class FloatingPanelController: ObservableObject {
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] mode in
-                let layout: PanelLayout = mode == .cliSessions ? .terminal : .chat
+                let layout: PanelLayout = mode == .cliSessions ? .terminal : .settings
                 self?.resizePanel(to: layout)
             }
             .store(in: &cancellables)

@@ -5,6 +5,10 @@ import Combine
 
 /// Manages multiple CLI terminal sessions.
 class CLISessionManager: ObservableObject {
+    struct RestorableSession: Codable {
+        let targetName: String
+        let workingDirectory: String?
+    }
 
     @Published var sessions: [CLISession] = []
     @Published var focusedSessionID: UUID?
@@ -18,8 +22,13 @@ class CLISessionManager: ObservableObject {
     // MARK: - Session Lifecycle
 
     @discardableResult
-    func createSession(for target: AITarget) -> CLISession {
-        let session = CLISession(target: target)
+    func createSession(for target: AITarget, workingDirectory: String? = nil) -> CLISession {
+        var configuredTarget = target
+        if let workingDirectory, !workingDirectory.isEmpty {
+            configuredTarget.workingDirectory = workingDirectory
+        }
+
+        let session = CLISession(target: configuredTarget)
         sessions.append(session)
 
         // Auto-focus the new session
@@ -83,5 +92,25 @@ class CLISessionManager: ObservableObject {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
         session.state = .running
         session.lastActivityDate = Date()
+    }
+
+    // MARK: - Persistence
+
+    func restorableSessions() -> [RestorableSession] {
+        sessions
+            .filter { $0.state != .exited }
+            .map {
+                RestorableSession(
+                    targetName: $0.target.name,
+                    workingDirectory: $0.currentDirectory ?? $0.target.workingDirectory
+                )
+            }
+    }
+
+    func restoreSessions(from snapshots: [RestorableSession], targets: [AITarget]) {
+        for snapshot in snapshots {
+            guard let target = targets.first(where: { $0.name == snapshot.targetName }) else { continue }
+            createSession(for: target, workingDirectory: snapshot.workingDirectory)
+        }
     }
 }

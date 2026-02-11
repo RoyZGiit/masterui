@@ -22,9 +22,6 @@ class AppState: ObservableObject {
     /// Currently selected target for sending messages.
     @Published var selectedTargetID: UUID?
 
-    /// Active conversations per target.
-    @Published var conversations: [UUID: Conversation] = [:]
-
     /// Whether the app is in element picker mode.
     @Published var isPickingElement: Bool = false
 
@@ -40,20 +37,31 @@ class AppState: ObservableObject {
     /// CLI session manager for terminal sessions.
     @Published var cliSessionManager = CLISessionManager()
 
+    /// Last folder chosen in "New Terminal Session".
+    @Published var lastSelectedCLIDirectory: String? {
+        didSet {
+            UserDefaults.standard.set(lastSelectedCLIDirectory, forKey: Self.lastCLIDirectoryKey)
+        }
+    }
+
     // MARK: - Private
 
     private let configFileURL: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".masterui_config.json")
     }()
-
-    private let connectorManager = ConnectorManager.shared
+    private let cliSessionsFileURL: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".masterui_cli_sessions.json")
+    }()
+    private static let lastCLIDirectoryKey = "lastSelectedCLIDirectory"
 
     // MARK: - Init
 
     private init() {
         // Load cliEnabled from UserDefaults (default true)
         self.cliEnabled = UserDefaults.standard.object(forKey: "cliEnabled") as? Bool ?? true
+        self.lastSelectedCLIDirectory = UserDefaults.standard.string(forKey: Self.lastCLIDirectoryKey)
 
         let configs = loadCLIConfigs()
         if configs.isEmpty {
@@ -66,6 +74,8 @@ class AppState: ObservableObject {
         }
 
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
+
+        restorePersistedCLISessions()
     }
 
     // MARK: - CLIToolConfig <-> AITarget conversion
@@ -115,76 +125,23 @@ class AppState: ObservableObject {
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
     }
 
-    // MARK: - Conversation
-
-    func conversation(for targetID: UUID) -> Conversation {
-        if let existing = conversations[targetID] {
-            return existing
-        }
-        let conv = Conversation(targetID: targetID)
-        conversations[targetID] = conv
-        return conv
-    }
-
-    func currentConversation() -> Conversation? {
-        guard let id = selectedTargetID else { return nil }
-        return conversation(for: id)
-    }
-
-    // MARK: - Send Message
-
-    func sendMessage(_ text: String) async {
-        guard let target = selectedTarget else { return }
-
-        let conv = conversation(for: target.id)
-
-        // Add user message
-        let userMessage = Message(role: .user, content: text)
-        await MainActor.run {
-            conv.addMessage(userMessage)
-        }
-
-        // Add placeholder assistant message
-        let assistantMessage = Message(role: .assistant, content: "", isStreaming: true)
-        await MainActor.run {
-            conv.addMessage(assistantMessage)
-        }
-
-        // Get connector and send
-        let connector = connectorManager.connector(for: target)
-
-        // Start monitoring for response
-        connector.startMonitoring { [weak conv] responseText, isComplete in
-            DispatchQueue.main.async {
-                conv?.updateLastAssistantMessage(content: responseText, isStreaming: !isComplete)
-                if isComplete {
-                    connector.stopMonitoring()
-                }
-            }
-        }
-
-        // Inject text and trigger send
-        let success = await connector.sendMessage(text)
-        if !success {
-            await MainActor.run {
-                conv.updateLastAssistantMessage(
-                    content: "Failed to send message. Make sure \(target.name) is running and MasterUI has accessibility permissions.",
-                    isStreaming: false
-                )
-            }
-            connector.stopMonitoring()
-        }
-    }
-
-    // MARK: - Jump to App
-
-    func jumpToApp() {
-        guard let target = selectedTarget else { return }
-        let connector = connectorManager.connector(for: target)
-        connector.activateApp()
-    }
-
     // MARK: - Persistence
+
+    func persistRuntimeState() {
+        saveCLISessionSnapshots()
+        saveAllSessionHistories()
+    }
+
+    private func saveAllSessionHistories() {
+        for session in cliSessionManager.sessions {
+            // Flush any pending turn via the terminal coordinator
+            if let termView = TerminalViewCache.shared.terminalView(for: session.id) {
+                termView.idleCoordinator?.flushPendingTurn()
+            }
+            // Save history to disk
+            SessionHistoryStore.shared.save(session.history)
+        }
+    }
 
     func saveCLIConfigs(_ configs: [CLIToolConfig]) {
         let encoder = JSONEncoder()
@@ -230,12 +187,31 @@ class AppState: ObservableObject {
     var configFilePath: String {
         return configFileURL.path
     }
+
+    // MARK: - CLI Session Persistence
+
+    private func saveCLISessionSnapshots() {
+        let snapshots = cliSessionManager.restorableSessions()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        if let data = try? encoder.encode(snapshots) {
+            try? data.write(to: cliSessionsFileURL)
+        }
+    }
+
+    private func restorePersistedCLISessions() {
+        guard cliEnabled,
+              let data = try? Data(contentsOf: cliSessionsFileURL),
+              let snapshots = try? JSONDecoder().decode([CLISessionManager.RestorableSession].self, from: data) else {
+            return
+        }
+        cliSessionManager.restoreSessions(from: snapshots, targets: targets)
+    }
 }
 
 // MARK: - Supporting Types
 
 enum ViewMode {
-    case chat
     case settings
     case cliSessions
 }

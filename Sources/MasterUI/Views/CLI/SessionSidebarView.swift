@@ -16,9 +16,12 @@ struct SessionSidebarView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(action: { showNewSessionSheet = true }) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 30, height: 30)
+                        .background(Color.accentColor.opacity(0.15))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("New Session (Cmd+T)")

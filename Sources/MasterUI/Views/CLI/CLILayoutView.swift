@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - CLILayoutView
 
@@ -17,17 +18,21 @@ struct CLILayoutView: View {
             // Right: Terminal area
             VStack(spacing: 0) {
                 if let session = sessionManager.focusedSession {
-                    // Terminal toolbar
+                    // Terminal toolbar with tab picker
                     terminalToolbar(for: session)
                     Divider()
-                    // Terminal view — .id() forces recreation when focused session changes
-                    EnhancedTerminalViewWrapper(
-                        session: session,
-                        onStateChange: { newState in
-                            handleStateChange(sessionID: session.id, state: newState)
-                        }
-                    )
-                    .id(session.id)
+                    // Content area: Terminal or History
+                    if session.activeTab == .history {
+                        SessionHistoryView(session: session)
+                    } else {
+                        EnhancedTerminalViewWrapper(
+                            session: session,
+                            onStateChange: { newState in
+                                handleStateChange(sessionID: session.id, state: newState)
+                            }
+                        )
+                        .id(session.id)
+                    }
                 } else {
                     noSessionView
                 }
@@ -65,6 +70,17 @@ struct CLILayoutView: View {
             }
 
             Spacer()
+
+            // Tab picker: Terminal / History
+            Picker("", selection: Binding(
+                get: { session.activeTab },
+                set: { session.activeTab = $0 }
+            )) {
+                Text("Terminal").tag(SessionTab.terminal)
+                Text("History").tag(SessionTab.history)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 160)
 
             // Quick actions
             if session.state != .exited {
@@ -152,9 +168,12 @@ struct CLILayoutView: View {
 /// Sheet for creating a new CLI session.
 struct NewCLISessionSheet: View {
     @ObservedObject var sessionManager: CLISessionManager
+    @ObservedObject private var appState = AppState.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedTarget: AITarget?
+    @State private var selectedDirectoryURL: URL?
+    @State private var showDirectoryPicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -225,12 +244,52 @@ struct NewCLISessionSheet: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Working Directory")
+                    .font(.system(size: 12, weight: .semibold))
+
+                HStack(spacing: 8) {
+                    Text(displayWorkingDirectory)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(displayWorkingDirectoryColor)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    if hasCustomDirectorySelection {
+                        Button {
+                            selectedDirectoryURL = nil
+                            appState.lastSelectedCLIDirectory = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear saved directory")
+                    }
+
+                    Button("Choose Folder") {
+                        showDirectoryPicker = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+
+            Divider()
+
             // Actions
             HStack {
                 Spacer()
                 Button("Create") {
                     if let target = selectedTarget {
-                        sessionManager.createSession(for: target)
+                        sessionManager.createSession(
+                            for: target,
+                            workingDirectory: resolvedWorkingDirectory
+                        )
                     }
                     dismiss()
                 }
@@ -251,9 +310,62 @@ struct NewCLISessionSheet: View {
         } message: {
             Text("Run this command in your terminal:\n\n\(alertInstallCommand)")
         }
+        .fileImporter(
+            isPresented: $showDirectoryPicker,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                selectedDirectoryURL = urls.first
+                appState.lastSelectedCLIDirectory = urls.first?.path
+            case .failure:
+                break
+            }
+        }
     }
 
     @State private var showInstallAlert = false
     @State private var alertTargetName = ""
     @State private var alertInstallCommand = ""
+
+    private var resolvedWorkingDirectory: String? {
+        if let selectedDirectoryURL {
+            return selectedDirectoryURL.path
+        }
+        if let lastDirectory = appState.lastSelectedCLIDirectory, !lastDirectory.isEmpty {
+            return lastDirectory
+        }
+        if let fallback = selectedTarget?.workingDirectory, !fallback.isEmpty {
+            return fallback
+        }
+        return nil
+    }
+
+    private var displayWorkingDirectory: String {
+        resolvedWorkingDirectory ?? "Default (~)"
+    }
+
+    private var displayWorkingDirectoryColor: Color {
+        resolvedWorkingDirectory == nil ? .secondary : .primary
+    }
+
+    private var hasCustomDirectorySelection: Bool {
+        selectedDirectoryURL != nil || (appState.lastSelectedCLIDirectory?.isEmpty == false)
+    }
+}
+
+// MARK: - Color Hex Extension
+
+extension Color {
+    init?(hex: String) {
+        var hexStr = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hexStr.hasPrefix("#") { hexStr.removeFirst() }
+        guard hexStr.count == 6, let intVal = UInt64(hexStr, radix: 16) else { return nil }
+        self.init(
+            red: Double((intVal >> 16) & 0xFF) / 255,
+            green: Double((intVal >> 8) & 0xFF) / 255,
+            blue: Double(intVal & 0xFF) / 255
+        )
+    }
 }

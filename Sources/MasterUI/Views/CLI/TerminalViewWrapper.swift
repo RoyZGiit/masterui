@@ -77,12 +77,19 @@ class TerminalViewCache {
 
 // MARK: - TerminalCoordinator
 
-/// Coordinator for terminal delegate callbacks and idle detection.
+/// Coordinator for terminal delegate callbacks, idle detection, and history capture.
 class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     let session: CLISession
     var onStateChange: ((SessionState) -> Void)?
     private var idleTimer: Timer?
     private let idleThreshold: TimeInterval = 2.0
+
+    // MARK: - History Capture State
+
+    /// The user input pending to be paired with model output.
+    var pendingInput: String?
+    /// Accumulated raw output bytes since the last user input.
+    private var outputBuffer = Data()
 
     init(session: CLISession, onStateChange: ((SessionState) -> Void)?) {
         self.session = session
@@ -101,10 +108,15 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-        // Could update session working directory display in the future
+        DispatchQueue.main.async {
+            self.session.currentDirectory = directory
+        }
     }
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
+        // Flush any pending turn before marking as exited
+        flushPendingTurn()
+
         DispatchQueue.main.async {
             self.session.state = .exited
             self.session.exitCode = exitCode
@@ -113,12 +125,55 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         idleTimer?.invalidate()
     }
 
+    // MARK: - Output Accumulation
+
+    /// Called from `MasterUITerminalView.dataReceived` to accumulate output bytes.
+    func accumulateOutput(_ slice: ArraySlice<UInt8>) {
+        outputBuffer.append(contentsOf: slice)
+    }
+
+    // MARK: - Turn Management
+
+    /// When the user presses Enter, commit the previous turn (if any)
+    /// and start a new one with the given input.
+    func commitInputLine(_ input: String) {
+        // Flush previous pending turn first
+        flushPendingTurn()
+
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        pendingInput = trimmed
+        outputBuffer = Data()
+    }
+
+    /// Flush the pending turn into session history.
+    /// Called when idle is detected or when a new input line arrives.
+    func flushPendingTurn() {
+        guard let input = pendingInput else { return }
+
+        let rawOutput = String(data: outputBuffer, encoding: .utf8) ?? ""
+        let cleaned = ANSICleaner.clean(rawOutput)
+
+        if !cleaned.isEmpty {
+            DispatchQueue.main.async {
+                self.session.appendTurn(input: input, output: cleaned)
+            }
+        }
+
+        pendingInput = nil
+        outputBuffer = Data()
+    }
+
     // MARK: - Idle Detection
 
     func resetIdleTimer() {
         idleTimer?.invalidate()
         idleTimer = Timer.scheduledTimer(withTimeInterval: idleThreshold, repeats: false) { [weak self] _ in
             guard let self = self else { return }
+
+            // When idle is detected, flush the pending turn
+            self.flushPendingTurn()
+
             DispatchQueue.main.async {
                 if self.session.state == .running {
                     self.session.state = .waitingForInput
@@ -139,24 +194,121 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     }
 }
 
+// MARK: - ANSICleaner
+
+/// Strips ANSI escape codes and cleans terminal output for history storage.
+enum ANSICleaner {
+    /// Clean raw terminal output: strip ANSI codes, handle carriage returns, normalize whitespace.
+    static func clean(_ raw: String) -> String {
+        // 1. Strip ANSI escape sequences (CSI, OSC, and simple escapes)
+        var text = raw
+        // CSI sequences: ESC [ ... final_byte
+        text = text.replacingOccurrences(
+            of: "\\x1B\\[[0-9;?]*[A-Za-z]",
+            with: "",
+            options: .regularExpression
+        )
+        // Also match \e as actual escape char
+        text = text.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;?]*[A-Za-z]",
+            with: "",
+            options: .regularExpression
+        )
+        // OSC sequences: ESC ] ... BEL/ST
+        text = text.replacingOccurrences(
+            of: "\u{1B}\\].*?(\u{07}|\u{1B}\\\\)",
+            with: "",
+            options: .regularExpression
+        )
+        // Simple escape sequences: ESC followed by single char
+        text = text.replacingOccurrences(
+            of: "\u{1B}[()][0-9A-Za-z]",
+            with: "",
+            options: .regularExpression
+        )
+        // Any remaining standalone ESC
+        text = text.replacingOccurrences(of: "\u{1B}", with: "")
+
+        // 2. Handle carriage returns: for each line, only keep content after last \r
+        let lines = text.components(separatedBy: "\n").map { line -> String in
+            if let lastCR = line.lastIndex(of: "\r") {
+                return String(line[line.index(after: lastCR)...])
+            }
+            return line
+        }
+
+        // 3. Strip trailing whitespace per line and collapse multiple blank lines
+        var result: [String] = []
+        var lastWasBlank = false
+        for line in lines {
+            let trimmed = line.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+            if trimmed.isEmpty {
+                if !lastWasBlank {
+                    result.append("")
+                }
+                lastWasBlank = true
+            } else {
+                result.append(trimmed)
+                lastWasBlank = false
+            }
+        }
+
+        // 4. Trim leading/trailing blank lines
+        while result.first?.isEmpty == true { result.removeFirst() }
+        while result.last?.isEmpty == true { result.removeLast() }
+
+        return result.joined(separator: "\n")
+    }
+}
+
 // MARK: - MasterUITerminalView
 
 /// Custom subclass of LocalProcessTerminalView that hooks into data received
-/// to support idle detection.
+/// to support idle detection and history capture.
 class MasterUITerminalView: LocalProcessTerminalView {
     weak var idleCoordinator: TerminalCoordinator?
+
+    /// Buffer for the current line being typed by the user.
+    private var inputLineBuffer: String = ""
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
         idleCoordinator?.resetIdleTimer()
+        idleCoordinator?.accumulateOutput(slice)
     }
-    
+
+    /// Intercept all data sent from terminal to PTY to track user input.
+    /// This is called for every keystroke and paste operation.
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        // Parse user-sent bytes to track input
+        for byte in data {
+            switch byte {
+            case 0x0D: // CR (Enter)
+                idleCoordinator?.commitInputLine(inputLineBuffer)
+                inputLineBuffer = ""
+            case 0x7F, 0x08: // DEL, BS (Backspace)
+                if !inputLineBuffer.isEmpty {
+                    inputLineBuffer.removeLast()
+                }
+            case 0x03: // ETX (Ctrl+C)
+                inputLineBuffer = ""
+            case 0x15: // NAK (Ctrl+U, clear line)
+                inputLineBuffer = ""
+            case 0x20...0x7E: // Printable ASCII
+                inputLineBuffer.append(Character(UnicodeScalar(byte)))
+            default:
+                // Multi-byte UTF-8 or control chars — append printable UTF-8 later if needed
+                break
+            }
+        }
+
+        super.send(source: source, data: data)
+    }
+
     // Enable standard copy command
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command) {
             if event.charactersIgnoringModifiers == "c" {
-                // Pass an empty string or self as sender instead of nil, or use a method that doesn't require it
-                // SwiftTerm's copy() expects (Any?)
                 copy(self)
                 return true
             } else if event.charactersIgnoringModifiers == "v" {
@@ -166,7 +318,7 @@ class MasterUITerminalView: LocalProcessTerminalView {
         }
         return super.performKeyEquivalent(with: event)
     }
-    
+
     // Ensure paste uses the correct pasteboard handling
     override func paste(_ sender: Any?) {
         if let string = NSPasteboard.general.string(forType: .string) {

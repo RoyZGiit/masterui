@@ -90,6 +90,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panelController.showPanel()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        AppState.shared.persistRuntimeState()
+    }
+
     private func setupMainMenu() {
         let mainMenu = NSMenu()
 
