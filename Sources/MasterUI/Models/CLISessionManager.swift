@@ -22,6 +22,7 @@ class CLISessionManager: ObservableObject {
     @Published var sessions: [CLISession] = []
     @Published var focusedSessionID: UUID?
     @Published var closedSessions: [ClosedSession] = []
+    var onSessionsChanged: (() -> Void)?
 
     /// Available CLI targets the user can create sessions for.
     var availableCLITargets: [AITarget] {
@@ -32,7 +33,13 @@ class CLISessionManager: ObservableObject {
     // MARK: - Session Lifecycle
 
     @discardableResult
-    func createSession(for target: AITarget, workingDirectory: String? = nil, sessionID: UUID? = nil, customTitle: String? = nil) -> CLISession {
+    func createSession(
+        for target: AITarget,
+        workingDirectory: String? = nil,
+        sessionID: UUID? = nil,
+        customTitle: String? = nil,
+        autoFocus: Bool = true
+    ) -> CLISession {
         var configuredTarget = target
         if let workingDirectory, !workingDirectory.isEmpty {
             configuredTarget.workingDirectory = workingDirectory
@@ -46,8 +53,11 @@ class CLISessionManager: ObservableObject {
         }
         sessions.append(session)
 
-        // Auto-focus the new session
-        focusedSessionID = session.id
+        if autoFocus {
+            focusedSessionID = session.id
+        }
+
+        onSessionsChanged?()
 
         return session
     }
@@ -72,6 +82,7 @@ class CLISessionManager: ObservableObject {
         }
 
         refreshClosedSessions()
+        onSessionsChanged?()
     }
 
     func focusSession(_ id: UUID) {
@@ -81,11 +92,13 @@ class CLISessionManager: ObservableObject {
         if let session = sessions.first(where: { $0.id == id }) {
             session.hasUnreadActivity = false
         }
+        onSessionsChanged?()
     }
 
     func renameSession(_ id: UUID, title: String) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
         session.rename(to: title)
+        onSessionsChanged?()
     }
 
     func reloadSession(_ id: UUID) {
@@ -108,6 +121,7 @@ class CLISessionManager: ObservableObject {
 
         // Immediately start a fresh process for this same session id.
         _ = TerminalViewCache.shared.getOrCreate(for: session, onStateChange: nil)
+        onSessionsChanged?()
     }
 
     // MARK: - State Queries
@@ -164,8 +178,15 @@ class CLISessionManager: ObservableObject {
     func restoreSessions(from snapshots: [RestorableSession], targets: [AITarget]) {
         for snapshot in snapshots {
             guard let target = targets.first(where: { $0.name == snapshot.targetName }) else { continue }
-            createSession(for: target, workingDirectory: snapshot.workingDirectory, sessionID: snapshot.sessionID, customTitle: snapshot.customTitle)
+            createSession(
+                for: target,
+                workingDirectory: snapshot.workingDirectory,
+                sessionID: snapshot.sessionID,
+                customTitle: snapshot.customTitle,
+                autoFocus: false
+            )
         }
+        onSessionsChanged?()
     }
 
     // MARK: - Recycle Bin
