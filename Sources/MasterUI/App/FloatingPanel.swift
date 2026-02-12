@@ -64,7 +64,7 @@ class FloatingPanel: NSPanel {
         minSize = PanelLayout.terminal.minSize
     }
 
-    /// Intercept key equivalents for terminal shortcuts (Cmd+T, Cmd+W, Cmd+1-9)
+    /// Intercept key equivalents for terminal shortcuts (Cmd+T, Cmd+W, Cmd+R, Cmd+1-9)
     /// before they reach the terminal view.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.contains(.command),
@@ -83,6 +83,12 @@ class FloatingPanel: NSPanel {
             // Cmd+W: Close focused session
             if let focusedID = sessionManager.focusedSessionID {
                 sessionManager.closeSession(focusedID)
+                return true
+            }
+        case "r":
+            // Cmd+R: Reload focused session (restart process, keep history)
+            if let focusedID = sessionManager.focusedSessionID {
+                sessionManager.reloadSession(focusedID)
                 return true
             }
         default:

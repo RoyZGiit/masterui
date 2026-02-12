@@ -26,6 +26,7 @@ class CLISession: ObservableObject, Identifiable {
 
     @Published var state: SessionState = .starting
     @Published var title: String
+    @Published var isCustomTitle: Bool = false
     @Published var lastActivityDate: Date
     @Published var exitCode: Int32?
     @Published var currentDirectory: String?
@@ -91,5 +92,12 @@ class CLISession: ObservableObject, Identifiable {
         )
         history.updatedAt = Date()
         SessionHistoryStore.shared.save(history)
+    }
+
+    func rename(to newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        title = trimmed
+        isCustomTitle = true
     }
 }

@@ -12,7 +12,15 @@ struct CLILayoutView: View {
     var body: some View {
         HSplitView {
             // Left: Session sidebar
-            SessionSidebarView(sessionManager: sessionManager)
+            SessionSidebarView(
+                sessionManager: sessionManager,
+                onRename: { sessionID, title in
+                    sessionManager.renameSession(sessionID, title: title)
+                },
+                onReload: { sessionID in
+                    sessionManager.reloadSession(sessionID)
+                }
+            )
                 .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
 
             // Right: Terminal area
@@ -21,6 +29,12 @@ struct CLILayoutView: View {
                     session: session,
                     onStateChange: { sessionID, state in
                         handleStateChange(sessionID: sessionID, state: state)
+                    },
+                    onRename: { sessionID, title in
+                        sessionManager.renameSession(sessionID, title: title)
+                    },
+                    onReload: { sessionID in
+                        sessionManager.reloadSession(sessionID)
                     },
                     onTerminate: { terminateSession($0) },
                     onNewSession: { showNewSessionSheet = true }
@@ -94,8 +108,12 @@ struct CLILayoutView: View {
 private struct SessionContentView: View {
     @ObservedObject var session: CLISession
     var onStateChange: (UUID, SessionState) -> Void
+    var onRename: (UUID, String) -> Void
+    var onReload: (UUID) -> Void
     var onTerminate: (CLISession) -> Void
     var onNewSession: () -> Void
+    @State private var showRenameAlert = false
+    @State private var renameDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -159,6 +177,27 @@ private struct SessionContentView: View {
             .frame(width: 160)
 
             // Quick actions
+            Button {
+                renameDraft = session.title
+                showRenameAlert = true
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Rename Session")
+
+            Button {
+                onReload(session.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Reload Session (restart process, keep history)")
+
             if session.state != .exited {
                 Button(action: { onTerminate(session) }) {
                     Image(systemName: "stop.circle")
@@ -179,6 +218,16 @@ private struct SessionContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+        .alert("Rename Session", isPresented: $showRenameAlert) {
+            TextField("Session title", text: $renameDraft)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                onRename(session.id, renameDraft)
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Set a custom name for this session.")
+        }
     }
 
     private func stateColor(for state: SessionState) -> Color {

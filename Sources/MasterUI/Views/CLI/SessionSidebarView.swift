@@ -5,6 +5,8 @@ import SwiftUI
 /// IM-style sidebar listing all CLI sessions.
 struct SessionSidebarView: View {
     @ObservedObject var sessionManager: CLISessionManager
+    var onRename: (UUID, String) -> Void
+    var onReload: (UUID) -> Void
     @State private var showNewSessionSheet = false
 
     var body: some View {
@@ -42,6 +44,8 @@ struct SessionSidebarView: View {
                                 session: session,
                                 isSelected: session.id == sessionManager.focusedSessionID,
                                 onSelect: { sessionManager.focusSession(session.id) },
+                                onRename: { onRename(session.id, $0) },
+                                onReload: { onReload(session.id) },
                                 onClose: { sessionManager.closeSession(session.id) }
                             )
                         }
@@ -83,8 +87,12 @@ struct SessionRowView: View {
     @ObservedObject var session: CLISession
     let isSelected: Bool
     let onSelect: () -> Void
+    let onRename: (String) -> Void
+    let onReload: () -> Void
     let onClose: () -> Void
     @State private var isHovering = false
+    @State private var showRenameAlert = false
+    @State private var renameDraft = ""
 
     var body: some View {
         HStack(spacing: 8) {
@@ -139,6 +147,29 @@ struct SessionRowView: View {
         .onTapGesture(perform: onSelect)
         .onHover { hovering in
             isHovering = hovering
+        }
+        .contextMenu {
+            Button("Rename Session") {
+                renameDraft = session.title
+                showRenameAlert = true
+            }
+            Button("Reload Session") {
+                onReload()
+            }
+            Divider()
+            Button("Close Session", role: .destructive) {
+                onClose()
+            }
+        }
+        .alert("Rename Session", isPresented: $showRenameAlert) {
+            TextField("Session title", text: $renameDraft)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                onRename(renameDraft)
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Set a custom name for this session.")
         }
     }
 

@@ -58,6 +58,33 @@ class CLISessionManager: ObservableObject {
         }
     }
 
+    func renameSession(_ id: UUID, title: String) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        session.rename(to: title)
+    }
+
+    func reloadSession(_ id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+
+        // Terminate existing process/view, but keep same session object and history.
+        TerminalViewCache.shared.remove(sessionID: id)
+
+        session.state = .starting
+        session.exitCode = nil
+        session.lastActivityDate = Date()
+        session.hasUnreadActivity = false
+        session.activeTab = .terminal
+        session.currentDirectory = session.target.workingDirectory
+
+        // Keep custom title; otherwise reset to default before process title updates.
+        if !session.isCustomTitle {
+            session.title = session.target.name
+        }
+
+        // Immediately start a fresh process for this same session id.
+        _ = TerminalViewCache.shared.getOrCreate(for: session, onStateChange: nil)
+    }
+
     // MARK: - State Queries
 
     var focusedSession: CLISession? {

@@ -132,7 +132,9 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
         DispatchQueue.main.async {
-            self.session.title = title
+            if !self.session.isCustomTitle {
+                self.session.title = title
+            }
         }
     }
 
