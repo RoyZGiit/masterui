@@ -27,8 +27,8 @@ struct GroupChatConversationView: View {
                             .id(message.id)
                         }
 
-                        // Pending responses indicator
-                        if !chat.pendingResponses.isEmpty {
+                        // Active processing indicator
+                        if coordinator.isConversationActive {
                             pendingIndicator
                         }
                     }
@@ -45,10 +45,10 @@ struct GroupChatConversationView: View {
 
             Divider()
 
-            // Input
+            // Input — always enabled, user can send at any time
             GroupChatInputBar(
                 coordinator: coordinator,
-                isWaiting: !chat.pendingResponses.isEmpty
+                isWaiting: false
             )
         }
     }
@@ -61,6 +61,17 @@ struct GroupChatConversationView: View {
                 .font(.system(size: 13, weight: .semibold))
 
             Spacer()
+
+            // Stop button when conversation is active
+            if coordinator.isConversationActive {
+                Button(action: { coordinator.stopAll() }) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Stop all AI responses")
+            }
 
             // Participant badges
             HStack(spacing: 4) {
@@ -105,10 +116,10 @@ struct GroupChatConversationView: View {
     }
 
     private var pendingNames: String {
-        let names = chat.pendingResponses.compactMap { sessionID in
-            sessionManager.sessions.first(where: { $0.id == sessionID })?.target.name
-        }
-        if names.isEmpty { return "Waiting..." }
+        let names = coordinator.controllers.values
+            .filter { $0.isProcessing }
+            .compactMap { $0.cliSession?.target.name }
+        if names.isEmpty { return "Thinking..." }
         return names.joined(separator: ", ") + " thinking..."
     }
 }
@@ -125,6 +136,8 @@ private struct GroupMessageBubble: View {
             userBubble
         case .ai(let name, _, let colorHex):
             aiBubble(name: name, colorHex: colorHex)
+        case .system:
+            systemBubble
         }
     }
 
@@ -164,6 +177,18 @@ private struct GroupMessageBubble: View {
                     .textSelection(.enabled)
             }
             Spacer(minLength: 60)
+        }
+    }
+
+    private var systemBubble: some View {
+        HStack {
+            Spacer()
+            Text(message.content)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+            Spacer()
         }
     }
 }

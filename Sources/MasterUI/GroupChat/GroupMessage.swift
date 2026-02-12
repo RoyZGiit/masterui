@@ -6,6 +6,7 @@ import Foundation
 enum GroupMessageSource: Codable, Equatable {
     case user
     case ai(name: String, sessionID: UUID, colorHex: String)
+    case system
 
     var displayName: String {
         switch self {
@@ -13,6 +14,8 @@ enum GroupMessageSource: Codable, Equatable {
             return "You"
         case .ai(let name, _, _):
             return name
+        case .system:
+            return "System"
         }
     }
 }

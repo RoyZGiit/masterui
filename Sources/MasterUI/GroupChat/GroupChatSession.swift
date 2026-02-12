@@ -10,7 +10,9 @@ class GroupChatSession: ObservableObject, Identifiable {
     @Published var title: String
     @Published var participantSessionIDs: [UUID]
     @Published var messages: [GroupMessage]
-    @Published var pendingResponses: Set<UUID>
+
+    /// Message sequence number, incremented on each append.
+    @Published var sequence: Int = 0
 
     init(
         id: UUID = UUID(),
@@ -22,7 +24,6 @@ class GroupChatSession: ObservableObject, Identifiable {
         self.title = title
         self.participantSessionIDs = participantSessionIDs
         self.messages = []
-        self.pendingResponses = []
         self.createdAt = createdAt
     }
 
@@ -33,19 +34,18 @@ class GroupChatSession: ObservableObject, Identifiable {
 
     func removeParticipant(_ sessionID: UUID) {
         participantSessionIDs.removeAll { $0 == sessionID }
-        pendingResponses.remove(sessionID)
     }
 
     func appendMessage(_ message: GroupMessage) {
         messages.append(message)
+        sequence += 1
     }
 
-    func markResponseReceived(sessionID: UUID) {
-        pendingResponses.remove(sessionID)
-    }
-
-    var allResponsesReceived: Bool {
-        pendingResponses.isEmpty
+    /// Returns all messages after the given sequence number.
+    func messages(after afterSequence: Int) -> [GroupMessage] {
+        let startIndex = afterSequence
+        guard startIndex < messages.count else { return [] }
+        return Array(messages[startIndex...])
     }
 
     /// Returns participant display names by resolving session IDs through the session manager.
@@ -59,18 +59,4 @@ class GroupChatSession: ObservableObject, Identifiable {
         return names
     }
 
-    /// Returns the AI messages from the most recent round (after the last user message).
-    var lastRoundAIMessages: [GroupMessage] {
-        guard let lastUserIndex = messages.lastIndex(where: {
-            if case .user = $0.source { return true }
-            return false
-        }) else {
-            return []
-        }
-        return Array(messages.suffix(from: messages.index(after: lastUserIndex)))
-            .filter {
-                if case .ai = $0.source { return true }
-                return false
-            }
-    }
 }

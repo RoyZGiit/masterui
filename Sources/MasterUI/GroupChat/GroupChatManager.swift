@@ -31,6 +31,7 @@ class GroupChatManager: ObservableObject {
             groupSession: session,
             sessionManager: sessionManager
         )
+        coordinator.setupControllers()
         coordinators[session.id] = coordinator
 
         return session

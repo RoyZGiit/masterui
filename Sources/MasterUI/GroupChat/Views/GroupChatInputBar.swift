@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - GroupChatInputBar
 
 /// Text input bar for sending messages to the group chat.
+/// Always enabled — the user can send messages at any time, even while AIs are responding.
 struct GroupChatInputBar: View {
     @ObservedObject var coordinator: GroupChatCoordinator
     let isWaiting: Bool
@@ -19,13 +20,6 @@ struct GroupChatInputBar: View {
                 .onSubmit {
                     send()
                 }
-                .disabled(isWaiting)
-
-            if isWaiting {
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 16, height: 16)
-            }
 
             Button(action: send) {
                 Image(systemName: "paperplane.fill")
@@ -44,12 +38,12 @@ struct GroupChatInputBar: View {
     }
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isWaiting
+        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isWaiting else { return }
+        guard !text.isEmpty else { return }
         inputText = ""
         coordinator.sendUserMessage(text)
     }
