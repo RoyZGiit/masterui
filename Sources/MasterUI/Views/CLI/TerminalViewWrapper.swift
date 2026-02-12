@@ -37,11 +37,13 @@ class TerminalViewCache {
         view.allowMouseReporting = false // Disable mouse reporting so standard selection works better
         // view.enableOSC52 = true          // SwiftTerm 1.2.0 might not expose this property publicly yet
 
-        // Build environment
+        // Build environment with enriched PATH so shebangs like #!/usr/bin/env node
+        // can find interpreters installed via Homebrew, NVM, Cargo, Bun, etc.
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
+        env["PATH"] = Self.enrichedPath(existing: env["PATH"])
         let envStrings = env.map { "\($0.key)=\($0.value)" }
 
         // Start the process
@@ -73,6 +75,43 @@ class TerminalViewCache {
 
     func terminalView(for sessionID: UUID) -> MasterUITerminalView? {
         views[sessionID]
+    }
+
+    /// Build a PATH that includes common binary directories for tools installed
+    /// via Homebrew, NVM, pip, Cargo, Bun, etc. Menu bar apps inherit a minimal
+    /// PATH (/usr/bin:/bin:/usr/sbin:/sbin), which causes #!/usr/bin/env shebangs
+    /// to fail when the interpreter lives in e.g. /opt/homebrew/bin.
+    static func enrichedPath(existing: String?) -> String {
+        let home = NSHomeDirectory()
+        var extra = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.bun/bin",
+        ]
+
+        // NVM node versions (newest first)
+        let nvmBase = "\(home)/.nvm/versions/node"
+        if let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmBase) {
+            for v in versions.sorted(by: >) {
+                extra.append("\(nvmBase)/\(v)/bin")
+            }
+        }
+
+        // Python user-local bins
+        let pyBase = "\(home)/Library/Python"
+        if let versions = try? FileManager.default.contentsOfDirectory(atPath: pyBase) {
+            for v in versions.sorted(by: >) {
+                extra.append("\(pyBase)/\(v)/bin")
+            }
+        }
+
+        let base = existing ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let baseParts = Set(base.components(separatedBy: ":"))
+        let newParts = extra.filter { !baseParts.contains($0) }
+        return (newParts + [base]).joined(separator: ":")
     }
 }
 
