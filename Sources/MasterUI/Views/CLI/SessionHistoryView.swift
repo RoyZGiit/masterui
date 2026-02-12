@@ -54,7 +54,7 @@ struct SessionHistoryView: View {
 // MARK: - HistoryBlockView
 
 /// Renders a single history block with sender and timestamp metadata.
-private struct HistoryBlockView: View {
+struct HistoryBlockView: View {
     let block: SessionBlock
 
     private var timeString: String {

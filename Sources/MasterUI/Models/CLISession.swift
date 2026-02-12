@@ -55,6 +55,10 @@ class CLISession: ObservableObject, Identifiable {
         // Try to load existing history or create empty
         if let existing = SessionHistoryStore.shared.load(sessionID: id) {
             self.history = existing
+            if let savedTitle = existing.customTitle {
+                self.title = savedTitle
+                self.isCustomTitle = true
+            }
         } else {
             self.history = SessionHistory(
                 sessionID: id,
@@ -99,5 +103,7 @@ class CLISession: ObservableObject, Identifiable {
         guard !trimmed.isEmpty else { return }
         title = trimmed
         isCustomTitle = true
+        history.customTitle = trimmed
+        SessionHistoryStore.shared.save(history)
     }
 }

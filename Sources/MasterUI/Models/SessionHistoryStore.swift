@@ -28,6 +28,7 @@ struct SessionHistory: Codable {
     let createdAt: Date
     var updatedAt: Date
     var blocks: [SessionBlock]
+    var customTitle: String?
 
     private enum CodingKeys: String, CodingKey {
         case sessionID
@@ -37,6 +38,7 @@ struct SessionHistory: Codable {
         case updatedAt
         case blocks
         case turns
+        case customTitle
     }
 
     /// Legacy persisted format: one item includes both user input and assistant output.
@@ -53,7 +55,8 @@ struct SessionHistory: Codable {
         workingDirectory: String?,
         createdAt: Date,
         updatedAt: Date,
-        blocks: [SessionBlock]
+        blocks: [SessionBlock],
+        customTitle: String? = nil
     ) {
         self.sessionID = sessionID
         self.targetName = targetName
@@ -61,6 +64,7 @@ struct SessionHistory: Codable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.blocks = blocks
+        self.customTitle = customTitle
     }
 
     init(from decoder: Decoder) throws {
@@ -70,6 +74,7 @@ struct SessionHistory: Codable {
         workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        customTitle = try container.decodeIfPresent(String.self, forKey: .customTitle)
 
         if let decodedBlocks = try container.decodeIfPresent([SessionBlock].self, forKey: .blocks) {
             blocks = decodedBlocks
@@ -93,6 +98,7 @@ struct SessionHistory: Codable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode(blocks, forKey: .blocks)
+        try container.encodeIfPresent(customTitle, forKey: .customTitle)
     }
 }
 
@@ -172,5 +178,32 @@ class SessionHistoryStore {
         if !fm.fileExists(atPath: historyDirectory.path) {
             try? fm.createDirectory(at: historyDirectory, withIntermediateDirectories: true)
         }
+    }
+}
+
+// MARK: - ClosedSession
+
+/// Lightweight model representing a closed session for the recycle bin.
+struct ClosedSession: Identifiable {
+    let id: UUID
+    let targetName: String
+    let customTitle: String?
+    let workingDirectory: String?
+    let createdAt: Date
+    let updatedAt: Date
+    let blockCount: Int
+
+    var displayTitle: String {
+        customTitle ?? targetName
+    }
+
+    init(from history: SessionHistory) {
+        self.id = history.sessionID
+        self.targetName = history.targetName
+        self.customTitle = history.customTitle
+        self.workingDirectory = history.workingDirectory
+        self.createdAt = history.createdAt
+        self.updatedAt = history.updatedAt
+        self.blockCount = history.blocks.count
     }
 }

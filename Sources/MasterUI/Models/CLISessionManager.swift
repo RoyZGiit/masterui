@@ -8,10 +8,20 @@ class CLISessionManager: ObservableObject {
     struct RestorableSession: Codable {
         let targetName: String
         let workingDirectory: String?
+        let customTitle: String?
+        let sessionID: UUID?
+
+        init(targetName: String, workingDirectory: String?, customTitle: String? = nil, sessionID: UUID? = nil) {
+            self.targetName = targetName
+            self.workingDirectory = workingDirectory
+            self.customTitle = customTitle
+            self.sessionID = sessionID
+        }
     }
 
     @Published var sessions: [CLISession] = []
     @Published var focusedSessionID: UUID?
+    @Published var closedSessions: [ClosedSession] = []
 
     /// Available CLI targets the user can create sessions for.
     var availableCLITargets: [AITarget] {
@@ -22,13 +32,18 @@ class CLISessionManager: ObservableObject {
     // MARK: - Session Lifecycle
 
     @discardableResult
-    func createSession(for target: AITarget, workingDirectory: String? = nil) -> CLISession {
+    func createSession(for target: AITarget, workingDirectory: String? = nil, sessionID: UUID? = nil, customTitle: String? = nil) -> CLISession {
         var configuredTarget = target
         if let workingDirectory, !workingDirectory.isEmpty {
             configuredTarget.workingDirectory = workingDirectory
         }
 
-        let session = CLISession(target: configuredTarget)
+        let session: CLISession
+        if let sessionID {
+            session = CLISession(id: sessionID, target: configuredTarget, title: customTitle)
+        } else {
+            session = CLISession(target: configuredTarget, title: customTitle)
+        }
         sessions.append(session)
 
         // Auto-focus the new session
@@ -38,6 +53,14 @@ class CLISessionManager: ObservableObject {
     }
 
     func closeSession(_ id: UUID) {
+        // Flush pending turn and save history before removing
+        if let session = sessions.first(where: { $0.id == id }) {
+            if let termView = TerminalViewCache.shared.terminalView(for: id) {
+                termView.idleCoordinator?.flushPendingTurn(force: true)
+            }
+            SessionHistoryStore.shared.save(session.history)
+        }
+
         // Terminate the terminal process and clean up cached view
         TerminalViewCache.shared.remove(sessionID: id)
 
@@ -47,6 +70,8 @@ class CLISessionManager: ObservableObject {
         if focusedSessionID == id {
             focusedSessionID = sessions.last(where: { $0.state != .exited })?.id
         }
+
+        refreshClosedSessions()
     }
 
     func focusSession(_ id: UUID) {
@@ -129,7 +154,9 @@ class CLISessionManager: ObservableObject {
             .map {
                 RestorableSession(
                     targetName: $0.target.name,
-                    workingDirectory: $0.currentDirectory ?? $0.target.workingDirectory
+                    workingDirectory: $0.currentDirectory ?? $0.target.workingDirectory,
+                    customTitle: $0.isCustomTitle ? $0.title : nil,
+                    sessionID: $0.id
                 )
             }
     }
@@ -137,7 +164,28 @@ class CLISessionManager: ObservableObject {
     func restoreSessions(from snapshots: [RestorableSession], targets: [AITarget]) {
         for snapshot in snapshots {
             guard let target = targets.first(where: { $0.name == snapshot.targetName }) else { continue }
-            createSession(for: target, workingDirectory: snapshot.workingDirectory)
+            createSession(for: target, workingDirectory: snapshot.workingDirectory, sessionID: snapshot.sessionID, customTitle: snapshot.customTitle)
         }
+    }
+
+    // MARK: - Recycle Bin
+
+    func refreshClosedSessions() {
+        let activeIDs = Set(sessions.map { $0.id })
+        closedSessions = SessionHistoryStore.shared.listAll()
+            .filter { !activeIDs.contains($0.sessionID) }
+            .map { ClosedSession(from: $0) }
+    }
+
+    func permanentlyDeleteClosedSession(_ id: UUID) {
+        SessionHistoryStore.shared.delete(sessionID: id)
+        closedSessions.removeAll { $0.id == id }
+    }
+
+    func clearAllClosedSessions() {
+        for closed in closedSessions {
+            SessionHistoryStore.shared.delete(sessionID: closed.id)
+        }
+        closedSessions.removeAll()
     }
 }

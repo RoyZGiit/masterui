@@ -76,6 +76,7 @@ class AppState: ObservableObject {
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
 
         restorePersistedCLISessions()
+        cliSessionManager.refreshClosedSessions()
     }
 
     // MARK: - CLIToolConfig <-> AITarget conversion

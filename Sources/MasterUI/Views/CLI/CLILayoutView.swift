@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct CLILayoutView: View {
     @ObservedObject var sessionManager: CLISessionManager
     @State private var showNewSessionSheet = false
+    @State private var selectedClosedSession: ClosedSession?
 
     var body: some View {
         HSplitView {
@@ -19,12 +20,18 @@ struct CLILayoutView: View {
                 },
                 onReload: { sessionID in
                     sessionManager.reloadSession(sessionID)
+                },
+                onSelectClosedSession: { closed in
+                    selectedClosedSession = closed
+                    sessionManager.focusedSessionID = nil
                 }
             )
                 .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
 
-            // Right: Terminal area
-            if let session = sessionManager.focusedSession {
+            // Right: Terminal area or closed session history
+            if let closed = selectedClosedSession {
+                ClosedSessionHistoryView(closedSession: closed)
+            } else if let session = sessionManager.focusedSession {
                 SessionContentView(
                     session: session,
                     onStateChange: { sessionID, state in
@@ -48,6 +55,18 @@ struct CLILayoutView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newCLISession)) { _ in
             showNewSessionSheet = true
+        }
+        .onChange(of: sessionManager.focusedSessionID) {
+            if sessionManager.focusedSessionID != nil {
+                selectedClosedSession = nil
+            }
+        }
+        .onChange(of: sessionManager.closedSessions.count) {
+            // Clear selection if the closed session was permanently deleted
+            if let selected = selectedClosedSession,
+               !sessionManager.closedSessions.contains(where: { $0.id == selected.id }) {
+                selectedClosedSession = nil
+            }
         }
     }
 
