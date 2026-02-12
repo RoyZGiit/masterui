@@ -82,11 +82,13 @@ class AppState: ObservableObject {
 
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
 
+        restorePersistedCLISessions()
+        cliSessionManager.refreshClosedSessions()
+
+        // Set up persistence listener AFTER initial restoration to avoid redundant writes
         cliSessionManager.onSessionsChanged = { [weak self] in
             self?.saveCLISessionSnapshots()
         }
-        restorePersistedCLISessions()
-        cliSessionManager.refreshClosedSessions()
     }
 
     // MARK: - CLIToolConfig <-> AITarget conversion
@@ -158,7 +160,7 @@ class AppState: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         if let data = try? encoder.encode(configs) {
-            try? data.write(to: configFileURL)
+            try? data.write(to: configFileURL, options: .atomic)
         }
     }
 
@@ -209,7 +211,7 @@ class AppState: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         if let data = try? encoder.encode(snapshot) {
-            try? data.write(to: cliSessionsFileURL)
+            try? data.write(to: cliSessionsFileURL, options: .atomic)
         }
     }
 

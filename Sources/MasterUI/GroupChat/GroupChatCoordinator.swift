@@ -46,6 +46,9 @@ class GroupChatCoordinator: ObservableObject {
                 sessionManager: sessionManager,
                 historyStore: historyStore
             )
+            controller.onDidPostResponse = { [weak self, weak controller] in
+                self?.notifyIdleControllers(except: controller?.sessionID)
+            }
             controllers[sessionID] = controller
             controller.startObserving()
         }
@@ -88,6 +91,18 @@ class GroupChatCoordinator: ObservableObject {
     func resetAll() {
         for (_, controller) in controllers {
             controller.reset()
+        }
+    }
+
+    // MARK: - Internal
+
+    /// Triggers idle controllers to check for new messages, excluding the one that just posted.
+    private func notifyIdleControllers(except senderID: UUID?) {
+        for (id, controller) in controllers {
+            guard id != senderID else { continue }
+            if controller.cliSession?.state == .waitingForInput && !controller.isProcessing {
+                controller.checkForNewMessages()
+            }
         }
     }
 }

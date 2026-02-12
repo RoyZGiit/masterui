@@ -94,6 +94,7 @@ class CLIConnector: AppConnectorProtocol {
             let process = try ptyManager.startProcess(
                 executable: target.executablePath,
                 arguments: target.arguments,
+                environment: ShellEnvironment.resolved,
                 workingDirectory: target.workingDirectory
             )
             

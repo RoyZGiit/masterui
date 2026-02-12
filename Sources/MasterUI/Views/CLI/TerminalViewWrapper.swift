@@ -37,13 +37,12 @@ class TerminalViewCache {
         view.allowMouseReporting = false // Disable mouse reporting so standard selection works better
         // view.enableOSC52 = true          // SwiftTerm 1.2.0 might not expose this property publicly yet
 
-        // Build environment with enriched PATH so shebangs like #!/usr/bin/env node
-        // can find interpreters installed via Homebrew, NVM, Cargo, Bun, etc.
-        var env = ProcessInfo.processInfo.environment
+        // Use the full shell environment captured from the user's login shell
+        // so that nvm, pyenv, Homebrew, etc. are all available.
+        var env = ShellEnvironment.resolved
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
-        env["PATH"] = Self.enrichedPath(existing: env["PATH"])
         let envStrings = env.map { "\($0.key)=\($0.value)" }
 
         // Start the process
@@ -77,42 +76,10 @@ class TerminalViewCache {
         views[sessionID]
     }
 
-    /// Build a PATH that includes common binary directories for tools installed
-    /// via Homebrew, NVM, pip, Cargo, Bun, etc. Menu bar apps inherit a minimal
-    /// PATH (/usr/bin:/bin:/usr/sbin:/sbin), which causes #!/usr/bin/env shebangs
-    /// to fail when the interpreter lives in e.g. /opt/homebrew/bin.
-    static func enrichedPath(existing: String?) -> String {
-        let home = NSHomeDirectory()
-        var extra = [
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-            "/usr/local/bin",
-            "\(home)/.local/bin",
-            "\(home)/.cargo/bin",
-            "\(home)/.bun/bin",
-        ]
-
-        // NVM node versions (newest first)
-        let nvmBase = "\(home)/.nvm/versions/node"
-        if let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmBase) {
-            for v in versions.sorted(by: >) {
-                extra.append("\(nvmBase)/\(v)/bin")
-            }
-        }
-
-        // Python user-local bins
-        let pyBase = "\(home)/Library/Python"
-        if let versions = try? FileManager.default.contentsOfDirectory(atPath: pyBase) {
-            for v in versions.sorted(by: >) {
-                extra.append("\(pyBase)/\(v)/bin")
-            }
-        }
-
-        let base = existing ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let baseParts = Set(base.components(separatedBy: ":"))
-        let newParts = extra.filter { !baseParts.contains($0) }
-        return (newParts + [base]).joined(separator: ":")
+    func coordinator(for sessionID: UUID) -> TerminalCoordinator? {
+        coordinators[sessionID]
     }
+
 }
 
 // MARK: - TerminalCoordinator
@@ -160,6 +127,37 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         self.session = session
         self.onStateChange = onStateChange
         super.init()
+    }
+
+    // MARK: - Programmatic Input
+
+    /// Prepare the coordinator for a programmatic payload injection (group chat).
+    /// Flushes any pending turn, creates a single user block for the full payload,
+    /// and resets output tracking so the subsequent response is captured cleanly.
+    func prepareForProgrammaticInput(_ text: String) {
+        flushPendingTurn(force: true)
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if Thread.isMainThread {
+            _ = session.appendBlock(role: .user, content: trimmed)
+        } else {
+            DispatchQueue.main.async {
+                _ = self.session.appendBlock(role: .user, content: trimmed)
+            }
+        }
+
+        pendingInput = trimmed
+        outputBuffer = Data()
+        activeAssistantBlockID = nil
+
+        if let view = terminalView {
+            let terminal = view.getTerminal()
+            let topRow = terminal.getTopVisibleRow()
+            let cursorY = terminal.getCursorLocation().y
+            outputStartRow = topRow + cursorY
+        }
     }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {
@@ -458,13 +456,21 @@ enum HistoryOutputCleaner {
 class MasterUITerminalView: LocalProcessTerminalView {
     weak var idleCoordinator: TerminalCoordinator?
 
+    /// When true, `send(source:data:)` skips input tracking (commitInputLine, etc.)
+    /// so that programmatic injection doesn't create per-line user blocks.
+    var suppressInputTracking = false
+
     /// Buffer for the current line being typed by the user.
     private var inputLineBuffer: String = ""
 
     /// Read text content from the terminal buffer starting at the given scroll-invariant row
     /// up to the current cursor position. This reads the already-rendered text from SwiftTerm's
     /// buffer, bypassing the need to parse raw ANSI byte streams.
-    func getBufferText(fromRow startRow: Int) -> String {
+    ///
+    /// - Parameter excludePromptLine: When true, the cursor's current line is excluded if it
+    ///   contains non-empty text. This is useful when capturing output during idle state, where
+    ///   the cursor sits on a new prompt line that is not part of the response.
+    func getBufferText(fromRow startRow: Int, excludePromptLine: Bool = false) -> String {
         let terminal = getTerminal()
         let topRow = terminal.getTopVisibleRow()
         let cursorY = terminal.getCursorLocation().y
@@ -473,8 +479,19 @@ class MasterUITerminalView: LocalProcessTerminalView {
         let start = max(0, startRow)
         guard start <= currentRow else { return "" }
 
+        var endRow = currentRow
+
+        if excludePromptLine, let cursorLine = terminal.getScrollInvariantLine(row: currentRow) {
+            let text = cursorLine.translateToString(trimRight: true)
+            if !text.trimmingCharacters(in: .whitespaces).isEmpty {
+                endRow = currentRow - 1
+            }
+        }
+
+        guard start <= endRow else { return "" }
+
         var lines: [String] = []
-        for row in start...currentRow {
+        for row in start...endRow {
             if let bufLine = terminal.getScrollInvariantLine(row: row) {
                 let text = bufLine.translateToString(trimRight: true)
                 lines.append(text)
@@ -489,6 +506,13 @@ class MasterUITerminalView: LocalProcessTerminalView {
         return lines.joined(separator: "\n")
     }
 
+    /// Returns the current scroll-invariant row (topRow + cursorY).
+    /// Used by `ParticipantController` to record where injection output starts.
+    func currentScrollInvariantRow() -> Int {
+        let terminal = getTerminal()
+        return terminal.getTopVisibleRow() + terminal.getCursorLocation().y
+    }
+
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
         idleCoordinator?.resetIdleTimer()
@@ -498,6 +522,13 @@ class MasterUITerminalView: LocalProcessTerminalView {
     /// Intercept all data sent from terminal to PTY to track user input.
     /// This is called for every keystroke and paste operation.
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        // Skip input tracking during programmatic injection to avoid
+        // creating per-line user blocks for pasted group chat payloads.
+        guard !suppressInputTracking else {
+            super.send(source: source, data: data)
+            return
+        }
+
         let bytes = Array(data)
 
         if bytes.count == 1 {

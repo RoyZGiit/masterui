@@ -123,46 +123,22 @@ struct PresetTargets {
 
     // MARK: - Helper
 
-    /// Detect the installed CLI path from common locations.
+    /// Detect the installed CLI path by searching directories in the user's
+    /// real shell PATH (captured via `ShellEnvironment`).
     static func detectPath(names: [String]) -> String {
-        let home = NSHomeDirectory()
-        var searchPaths = [
-            "/opt/homebrew/bin",        // Homebrew (Apple Silicon)
-            "/usr/local/bin",           // Homebrew (Intel) / manual installs
-            "/usr/bin",
-            "/bin",
-            "\(home)/.local/bin",       // pip --user, cargo install, etc.
-            "\(home)/.cargo/bin",       // Rust toolchain
-            "\(home)/.bun/bin",         // Bun runtime
-        ]
-
-        // Add NVM paths if available (newest node version first)
-        let nvmPath = "\(home)/.nvm/versions/node"
-        if let nodeVersions = try? FileManager.default.contentsOfDirectory(atPath: nvmPath) {
-            for version in nodeVersions.sorted(by: >) {
-                searchPaths.append("\(nvmPath)/\(version)/bin")
-            }
-        }
-
-        // Add Python user-local bin paths (scan for installed versions)
-        let pythonBase = "\(home)/Library/Python"
-        if let pyVersions = try? FileManager.default.contentsOfDirectory(atPath: pythonBase) {
-            for version in pyVersions.sorted(by: >) {
-                searchPaths.append("\(pythonBase)/\(version)/bin")
-            }
-        }
+        let pathDirs = (ShellEnvironment.resolved["PATH"] ?? "")
+            .components(separatedBy: ":")
+            .filter { !$0.isEmpty }
 
         for name in names {
-            for path in searchPaths {
-                let fullPath = "\(path)/\(name)"
+            for dir in pathDirs {
+                let fullPath = "\(dir)/\(name)"
                 if FileManager.default.isExecutableFile(atPath: fullPath) {
                     return fullPath
                 }
             }
         }
-        
-        // Return just the name if not found, so we can detect it's missing by path check later
-        // or we could return empty string. Returning name allows manual resolution or checking.
+
         return names.first ?? ""
     }
 }
