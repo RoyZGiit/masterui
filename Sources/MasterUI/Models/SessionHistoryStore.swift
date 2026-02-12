@@ -167,6 +167,11 @@ class SessionHistoryStore {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    /// Returns the on-disk file path for a session's history JSON.
+    func filePath(for sessionID: UUID) -> String {
+        fileURL(for: sessionID).path
+    }
+
     // MARK: - Private
 
     private func fileURL(for sessionID: UUID) -> URL {

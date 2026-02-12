@@ -19,10 +19,15 @@ struct PanelContentView: View {
                 SettingsView()
             case .cliSessions:
                 CLILayoutView(sessionManager: appState.cliSessionManager)
+            case .groupChat:
+                GroupChatLayoutView(
+                    manager: appState.groupChatManager,
+                    sessionManager: appState.cliSessionManager
+                )
             }
         }
-        .frame(minWidth: appState.viewMode == .cliSessions ? 700 : 480,
-               minHeight: appState.viewMode == .cliSessions ? 500 : 400)
+        .frame(minWidth: appState.viewMode == .settings ? 480 : 700,
+               minHeight: appState.viewMode == .settings ? 400 : 500)
         .background(.ultraThinMaterial)
     }
 
@@ -40,6 +45,23 @@ struct PanelContentView: View {
                 .foregroundStyle(.primary)
 
             Spacer()
+
+            // Group Chat Toggle
+            Button(action: {
+                withAnimation(.snappy) {
+                    if appState.viewMode == .groupChat {
+                        appState.viewMode = .cliSessions
+                    } else {
+                        appState.viewMode = .groupChat
+                    }
+                }
+            }) {
+                Image(systemName: "person.3.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(appState.viewMode == .groupChat ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(appState.viewMode == .groupChat ? "Back to Sessions" : "Group Chat")
 
             // Settings Toggle
             Button(action: {

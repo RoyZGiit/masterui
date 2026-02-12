@@ -133,6 +133,7 @@ private struct SessionContentView: View {
     var onNewSession: () -> Void
     @State private var showRenameAlert = false
     @State private var renameDraft = ""
+    @State private var showCopiedHistoryPath = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -196,6 +197,22 @@ private struct SessionContentView: View {
             .frame(width: 160)
 
             // Quick actions
+            Button {
+                let path = SessionHistoryStore.shared.filePath(for: session.id)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+                showCopiedHistoryPath = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    showCopiedHistoryPath = false
+                }
+            } label: {
+                Image(systemName: showCopiedHistoryPath ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 13))
+                    .foregroundStyle(showCopiedHistoryPath ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy history file path: \(SessionHistoryStore.shared.filePath(for: session.id))")
+
             Button {
                 renameDraft = session.title
                 showRenameAlert = true

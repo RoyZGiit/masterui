@@ -37,6 +37,9 @@ class AppState: ObservableObject {
     /// CLI session manager for terminal sessions.
     @Published var cliSessionManager = CLISessionManager()
 
+    /// Group chat manager for multi-AI conversations.
+    @Published var groupChatManager = GroupChatManager()
+
     /// Last folder chosen in "New Terminal Session".
     @Published var lastSelectedCLIDirectory: String? {
         didSet {
@@ -243,6 +246,7 @@ class AppState: ObservableObject {
 enum ViewMode {
     case settings
     case cliSessions
+    case groupChat
 }
 
 enum ElementPickerStep {

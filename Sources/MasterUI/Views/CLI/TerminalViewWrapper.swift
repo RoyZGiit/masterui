@@ -136,9 +136,6 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     private var outputStartRow: Int = 0
     /// Current assistant block being updated while output streams in.
     private var activeAssistantBlockID: UUID?
-    /// True after the first user input has been committed. Prevents the
-    /// startup-noise guard from blocking output after interactive prompts.
-    private var hasReceivedUserInput = false
 
     /// Move output start row to the line after current cursor so consumed text
     /// is not re-read and appended repeatedly on later idle flushes.
@@ -210,8 +207,6 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         // Capture any final assistant text before starting the next user block.
         flushPendingTurn(force: true)
 
-        hasReceivedUserInput = true
-
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -242,8 +237,12 @@ class TerminalCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     ///
     /// - Parameter force: true when user switched tab or process is exiting.
     func flushPendingTurn(force: Bool = false) {
-        // Ignore process startup noise before the first user input.
-        if pendingInput == nil && activeAssistantBlockID == nil && !hasReceivedUserInput {
+        // Only capture output when a turn is active:
+        // 1) pendingInput != nil means user submitted input and we are waiting for output.
+        // 2) activeAssistantBlockID != nil means output is streaming and we are updating it.
+        // When both are nil, terminal content is likely prompt/user typing and must not be
+        // persisted as assistant history.
+        if pendingInput == nil && activeAssistantBlockID == nil {
             if force {
                 outputBuffer = Data()
                 advanceOutputStartRowPastCursor()
@@ -557,10 +556,25 @@ class MasterUITerminalView: LocalProcessTerminalView {
         return super.performKeyEquivalent(with: event)
     }
 
-    // Ensure paste uses the correct pasteboard handling
+    // Ensure paste uses the correct pasteboard handling with bracketed paste support
     override func paste(_ sender: Any?) {
         if let string = NSPasteboard.general.string(forType: .string) {
-            send(txt: string)
+            sendAsPaste(string)
+        }
+    }
+
+    /// Send text as a paste operation, respecting bracketed paste mode.
+    /// TUI applications (Claude CLI, etc.) use bracketed paste mode so that
+    /// multi-line pasted content is treated as a single input block rather than
+    /// each newline being interpreted as pressing Enter.
+    func sendAsPaste(_ text: String) {
+        let terminal = getTerminal()
+        if terminal.bracketedPasteMode {
+            send(EscapeSequences.bracketedPasteStart)
+        }
+        send(txt: text)
+        if terminal.bracketedPasteMode {
+            send(EscapeSequences.bracketedPasteEnd)
         }
     }
 }
