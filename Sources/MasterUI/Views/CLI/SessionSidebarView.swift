@@ -65,7 +65,9 @@ struct SessionSidebarView: View {
                                 ForEach(sessionManager.closedSessions) { closed in
                                     ClosedSessionRowView(
                                         closedSession: closed,
+                                        canRestore: sessionManager.canRestoreClosedSession(closed.id),
                                         onSelect: { onSelectClosedSession?(closed) },
+                                        onRestore: { _ = sessionManager.restoreClosedSession(closed.id) },
                                         onDelete: { sessionManager.permanentlyDeleteClosedSession(closed.id) }
                                     )
                                 }
@@ -262,7 +264,9 @@ struct SessionRowView: View {
 /// Row for a closed session in the recycle bin section.
 struct ClosedSessionRowView: View {
     let closedSession: ClosedSession
+    let canRestore: Bool
     let onSelect: () -> Void
+    let onRestore: () -> Void
     let onDelete: () -> Void
     @State private var isHovering = false
 
@@ -299,6 +303,15 @@ struct ClosedSessionRowView: View {
                 .lineLimit(1)
 
             if isHovering {
+                Button(action: onRestore) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(canRestore ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRestore)
+                .help(canRestore ? "Restore session" : "Cannot restore: target unavailable")
+
                 Button(action: onDelete) {
                     Image(systemName: "trash.circle.fill")
                         .font(.system(size: 12))
@@ -323,6 +336,10 @@ struct ClosedSessionRowView: View {
             Button("View History") {
                 onSelect()
             }
+            Button("Restore Session") {
+                onRestore()
+            }
+            .disabled(!canRestore)
             Divider()
             Button("Delete Permanently", role: .destructive) {
                 onDelete()

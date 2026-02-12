@@ -182,6 +182,32 @@ class CLISessionManager: ObservableObject {
         closedSessions.removeAll { $0.id == id }
     }
 
+    func canRestoreClosedSession(_ id: UUID) -> Bool {
+        guard let history = SessionHistoryStore.shared.load(sessionID: id) else { return false }
+        return availableCLITargets.contains(where: { $0.name == history.targetName })
+    }
+
+    @discardableResult
+    func restoreClosedSession(_ id: UUID) -> Bool {
+        if sessions.contains(where: { $0.id == id }) {
+            focusSession(id)
+            refreshClosedSessions()
+            return true
+        }
+
+        guard let history = SessionHistoryStore.shared.load(sessionID: id) else { return false }
+        guard let target = availableCLITargets.first(where: { $0.name == history.targetName }) else { return false }
+
+        createSession(
+            for: target,
+            workingDirectory: history.workingDirectory,
+            sessionID: history.sessionID,
+            customTitle: history.customTitle
+        )
+        refreshClosedSessions()
+        return true
+    }
+
     func clearAllClosedSessions() {
         for closed in closedSessions {
             SessionHistoryStore.shared.delete(sessionID: closed.id)
