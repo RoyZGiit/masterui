@@ -55,6 +55,10 @@ class AppState: ObservableObject {
         return home.appendingPathComponent(".masterui_cli_sessions.json")
     }()
     private static let lastCLIDirectoryKey = "lastSelectedCLIDirectory"
+    private struct CLISessionPersistenceSnapshot: Codable {
+        let sessions: [CLISessionManager.RestorableSession]
+        let focusedSessionID: UUID?
+    }
 
     // MARK: - Init
 
@@ -75,6 +79,9 @@ class AppState: ObservableObject {
 
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
 
+        cliSessionManager.onSessionsChanged = { [weak self] in
+            self?.saveCLISessionSnapshots()
+        }
         restorePersistedCLISessions()
         cliSessionManager.refreshClosedSessions()
     }
@@ -192,21 +199,42 @@ class AppState: ObservableObject {
     // MARK: - CLI Session Persistence
 
     private func saveCLISessionSnapshots() {
-        let snapshots = cliSessionManager.restorableSessions()
+        let snapshot = CLISessionPersistenceSnapshot(
+            sessions: cliSessionManager.restorableSessions(),
+            focusedSessionID: cliSessionManager.focusedSessionID
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        if let data = try? encoder.encode(snapshots) {
+        if let data = try? encoder.encode(snapshot) {
             try? data.write(to: cliSessionsFileURL)
         }
     }
 
     private func restorePersistedCLISessions() {
         guard cliEnabled,
-              let data = try? Data(contentsOf: cliSessionsFileURL),
-              let snapshots = try? JSONDecoder().decode([CLISessionManager.RestorableSession].self, from: data) else {
+              let data = try? Data(contentsOf: cliSessionsFileURL) else {
             return
         }
-        cliSessionManager.restoreSessions(from: snapshots, targets: targets)
+        let decoder = JSONDecoder()
+
+        if let snapshot = try? decoder.decode(CLISessionPersistenceSnapshot.self, from: data) {
+            cliSessionManager.restoreSessions(from: snapshot.sessions, targets: targets)
+            if let focusedID = snapshot.focusedSessionID,
+               cliSessionManager.sessions.contains(where: { $0.id == focusedID }) {
+                cliSessionManager.focusSession(focusedID)
+            } else if let firstID = cliSessionManager.sessions.first?.id {
+                cliSessionManager.focusSession(firstID)
+            }
+            return
+        }
+
+        // Backward compatibility with old schema that persisted only the session array.
+        if let legacySessions = try? decoder.decode([CLISessionManager.RestorableSession].self, from: data) {
+            cliSessionManager.restoreSessions(from: legacySessions, targets: targets)
+            if let firstID = cliSessionManager.sessions.first?.id {
+                cliSessionManager.focusSession(firstID)
+            }
+        }
     }
 }
 
