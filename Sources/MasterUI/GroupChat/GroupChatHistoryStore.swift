@@ -76,7 +76,7 @@ class GroupChatHistoryStore {
             participantSessionIDs: session.participantSessionIDs,
             createdAt: session.createdAt,
             updatedAt: session.lastActivityDate,
-            messages: session.messages
+            messages: session.messages.filter(\.persist)
         )
 
         guard let data = try? encoder.encode(file) else { return }

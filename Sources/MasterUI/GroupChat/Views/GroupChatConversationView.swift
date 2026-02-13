@@ -10,71 +10,113 @@ struct GroupChatConversationView: View {
     @ObservedObject var sessionManager: CLISessionManager
     @State private var showDebugPanel = false
 
+    /// Active ephemeral runs: only the latest incomplete run per agent.
+    private var activeRuns: [GroupChatEphemeralRun] {
+        var latestByAgent: [String: GroupChatEphemeralRun] = [:]
+        for run in chat.ephemeralRuns where run.completedAt == nil {
+            latestByAgent[run.agentId] = run
+        }
+        return Array(latestByAgent.values).sorted { $0.lastUpdatedAt < $1.lastUpdatedAt }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            conversationHeader
-                .background(.ultraThinMaterial)
-
-            Divider()
-
-            // Debug panel
-            if showDebugPanel {
-                ParticipantDebugPanel(
-                    coordinator: coordinator,
-                    sessionManager: sessionManager
-                )
-                Divider()
-            }
-
-            // Messages
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 16) { // Increased spacing for cleaner look
-                        ForEach(chat.messages) { message in
-                            GroupMessageBubble(
-                                message: message,
-                                participantLabels: participantLabels
-                            )
-                            .id(message.id)
-                        }
-
-                        // Stall banner
-                        if coordinator.isStalled {
-                            stalledBanner
-                        }
-
-                        // Active processing indicator
-                        if coordinator.isConversationActive {
-                            pendingIndicator
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 20)
-                }
-                .onChange(of: chat.messages.count) {
-                    scrollToBottom(proxy: proxy)
-                }
-                .onAppear {
-                    scrollToBottom(proxy: proxy)
-                }
-            }
-
-            Divider()
-
-            // Input — always enabled
-            GroupChatInputBar(
+        HStack(spacing: 0) {
+            // Member sidebar
+            GroupChatMemberSidebar(
+                chat: chat,
                 coordinator: coordinator,
-                isWaiting: false
+                sessionManager: sessionManager,
+                participantLabels: participantLabels,
+                statusDisplay: { statusDisplay(for: $0) },
+                statusColor: { statusColor(for: $0) }
             )
-            .background(.regularMaterial)
+
+            Divider()
+
+            // Main conversation area
+            VStack(spacing: 0) {
+                // Header
+                conversationHeader
+                    .background(.ultraThinMaterial)
+
+                Divider()
+
+                // Debug panel
+                if showDebugPanel {
+                    ParticipantDebugPanel(
+                        coordinator: coordinator,
+                        sessionManager: sessionManager
+                    )
+                    Divider()
+                }
+
+                // Messages
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
+                            ForEach(chat.messages) { message in
+                                GroupMessageBubble(
+                                    message: message,
+                                    participantLabels: participantLabels
+                                )
+                                .id("msg-\(message.id.uuidString)")
+                            }
+
+                            ForEach(activeRuns) { run in
+                                EphemeralRunCard(
+                                    run: run,
+                                    displayName: displayName(forAgentID: run.agentId),
+                                    colorHex: colorHex(forAgentID: run.agentId)
+                                )
+                                .id("run-\(run.id)")
+                            }
+
+                            // Stall banner
+                            if coordinator.isStalled {
+                                stalledBanner
+                            }
+
+                            // Active processing indicator
+                            if coordinator.isConversationActive {
+                                pendingIndicator
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 20)
+                    }
+                    .onChange(of: chat.messages.count) {
+                        scrollToBottom(proxy: proxy)
+                    }
+                    .onChange(of: chat.liveSequence) {
+                        scrollToBottom(proxy: proxy)
+                    }
+                    .onAppear {
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+
+                Divider()
+
+                // Input — always enabled
+                GroupChatInputBar(
+                    coordinator: coordinator,
+                    isWaiting: false
+                )
+                .background(.regularMaterial)
+            }
         }
     }
     
     private func scrollToBottom(proxy: ScrollViewProxy) {
-        if let lastID = chat.messages.last?.id {
+        if let lastRunID = activeRuns.last?.id {
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(lastID, anchor: .bottom)
+                proxy.scrollTo("run-\(lastRunID)", anchor: .bottom)
+            }
+            return
+        }
+        if let lastMessageID = chat.messages.last?.id {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("msg-\(lastMessageID.uuidString)", anchor: .bottom)
             }
         }
     }
@@ -128,23 +170,9 @@ struct GroupChatConversationView: View {
             }
             .buttonStyle(.plain)
             .help("Toggle debug panel")
-
-            // Participant badges
-            HStack(spacing: -4) { // Overlapping avatars effect
-                ForEach(chat.participantSessionIDs, id: \.self) { sessionID in
-                    if let session = sessionManager.sessions.first(where: { $0.id == sessionID }) {
-                        AvatarView(
-                            name: participantLabels[sessionID] ?? session.target.name,
-                            colorHex: session.target.colorHex,
-                            size: 20
-                        )
-                            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
-                    }
-                }
-            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Stalled Banner
@@ -194,6 +222,277 @@ struct GroupChatConversationView: View {
     private var participantLabels: [UUID: String] {
         chat.participantDisplayNames(sessionManager: sessionManager)
     }
+
+    private func colorHex(for sessionID: UUID) -> String {
+        sessionManager.sessions.first(where: { $0.id == sessionID })?.target.colorHex ?? "#9CA3AF"
+    }
+
+    private func colorHex(forAgentID agentId: String) -> String {
+        if let resolved = resolveSessionID(forAgentID: agentId) {
+            return colorHex(for: resolved)
+        }
+        return "#9CA3AF"
+    }
+
+    private func displayName(forAgentID agentId: String) -> String {
+        if let resolved = resolveSessionID(forAgentID: agentId) {
+            return participantLabels[resolved] ?? agentId
+        }
+        return agentId
+    }
+
+    private func resolveSessionID(forAgentID agentId: String) -> UUID? {
+        if let uuid = UUID(uuidString: agentId), chat.participantSessionIDs.contains(uuid) {
+            return uuid
+        }
+
+        let normalizedAgentID = agentId.lowercased()
+        for sessionID in chat.participantSessionIDs {
+            let label = (participantLabels[sessionID] ?? "").lowercased()
+            let targetName = (sessionManager.sessions.first(where: { $0.id == sessionID })?.target.name ?? "").lowercased()
+            if normalizedAgentID == label
+                || normalizedAgentID == targetName
+                || label.contains(normalizedAgentID)
+                || normalizedAgentID.contains(label)
+                || targetName.contains(normalizedAgentID)
+                || normalizedAgentID.contains(targetName) {
+                return sessionID
+            }
+        }
+        return nil
+    }
+
+    private func statusDisplay(for sessionID: UUID) -> ParticipantStatusDisplay {
+        if let status = resolvedStatus(for: sessionID) {
+            let text = status.phaseText?.isEmpty == false ? status.phaseText! : localizedStatus(status.status)
+            return ParticipantStatusDisplay(
+                text: text,
+                color: statusColor(for: status.status),
+                timestamp: status.ts
+            )
+        }
+
+        if let controller = coordinator.controllers[sessionID], controller.isProcessing {
+            return ParticipantStatusDisplay(
+                text: "streaming",
+                color: statusColor(for: .streaming),
+                timestamp: Date()
+            )
+        }
+
+        return ParticipantStatusDisplay(
+            text: "idle",
+            color: statusColor(for: .idle),
+            timestamp: Date()
+        )
+    }
+
+    private func resolvedStatus(for sessionID: UUID) -> GroupChatAgentStateSnapshot? {
+        let matching = chat.liveAgentStates.values.filter { snapshot in
+            resolveSessionID(forAgentID: snapshot.agentId) == sessionID
+        }
+        return matching.max { $0.ts < $1.ts }
+    }
+
+    private func localizedStatus(_ status: GroupChatAgentStatus) -> String {
+        switch status {
+        case .idle: return "idle"
+        case .queued: return "queued"
+        case .running: return "running"
+        case .thinking: return "thinking"
+        case .callingTool, .toolRunning: return "tool running"
+        case .waitingTool: return "waiting tool"
+        case .drafting: return "drafting"
+        case .streaming: return "streaming"
+        case .summarizing: return "summarizing"
+        case .done: return "done"
+        case .error: return "error"
+        }
+    }
+
+    private func statusColor(for status: GroupChatAgentStatus) -> Color {
+        switch status {
+        case .idle:
+            return .secondary
+        case .queued:
+            return .gray
+        case .running:
+            return .blue
+        case .thinking:
+            return .indigo
+        case .callingTool, .toolRunning:
+            return .orange
+        case .waitingTool:
+            return .yellow
+        case .drafting:
+            return .mint
+        case .streaming:
+            return .teal
+        case .summarizing:
+            return .purple
+        case .done:
+            return .green
+        case .error:
+            return .red
+        }
+    }
+}
+
+private struct ParticipantStatusDisplay {
+    let text: String
+    let color: Color
+    let timestamp: Date
+}
+
+private struct GroupChatMemberSidebar: View {
+    @ObservedObject var chat: GroupChatSession
+    @ObservedObject var coordinator: GroupChatCoordinator
+    @ObservedObject var sessionManager: CLISessionManager
+    let participantLabels: [UUID: String]
+    let statusDisplay: (UUID) -> ParticipantStatusDisplay
+    let statusColor: (GroupChatAgentStatus) -> Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Members")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(chat.participantSessionIDs, id: \.self) { sessionID in
+                        if let session = sessionManager.sessions.first(where: { $0.id == sessionID }) {
+                            let label = participantLabels[sessionID] ?? session.target.name
+                            let status = statusDisplay(sessionID)
+                            HStack(spacing: 8) {
+                                AvatarView(name: label, colorHex: session.target.colorHex, size: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(label)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1)
+                                    HStack(spacing: 4) {
+                                        Circle()
+                                            .fill(status.color)
+                                            .frame(width: 6, height: 6)
+                                        Text(status.text)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .frame(width: 160)
+        .background(.ultraThinMaterial)
+    }
+}
+
+private struct EphemeralRunCard: View {
+    let run: GroupChatEphemeralRun
+    let displayName: String
+    let colorHex: String
+
+    @State private var isExpanded: Bool
+
+    init(run: GroupChatEphemeralRun, displayName: String, colorHex: String) {
+        self.run = run
+        self.displayName = displayName
+        self.colorHex = colorHex
+        _isExpanded = State(initialValue: !run.isCollapsed)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                AvatarView(name: displayName, colorHex: colorHex, size: 20)
+                Text(displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if run.completedAt != nil {
+                    Text("completed")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.green)
+                } else {
+                    Text("in progress")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(run.cards) { card in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: iconName(for: card.kind))
+                                .font(.system(size: 10))
+                                .foregroundStyle(iconColor(for: card.kind))
+                                .frame(width: 12)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(card.text)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                                Text(card.ts, style: .time)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Text("Temporary process (\(run.cards.count))")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                .foregroundStyle(Color.secondary.opacity(0.3))
+        )
+        .onChange(of: run.isCollapsed) {
+            if run.isCollapsed {
+                isExpanded = false
+            }
+        }
+    }
+
+    private func iconName(for kind: GroupChatEphemeralKind) -> String {
+        switch kind {
+        case .thought:
+            return "brain"
+        case .action:
+            return "wrench.and.screwdriver"
+        case .result:
+            return "checkmark.circle"
+        }
+    }
+
+    private func iconColor(for kind: GroupChatEphemeralKind) -> Color {
+        switch kind {
+        case .thought:
+            return .indigo
+        case .action:
+            return .orange
+        case .result:
+            return .green
+        }
+    }
 }
 
 // MARK: - Message Bubble
@@ -202,6 +501,7 @@ private struct GroupMessageBubble: View {
     let message: GroupMessage
     let participantLabels: [UUID: String]
     @State private var showDetails = false
+    @State private var showThinking = false
 
     var body: some View {
         switch message.source {
@@ -250,18 +550,18 @@ private struct GroupMessageBubble: View {
         return HStack(alignment: .top, spacing: 10) {
             AvatarView(name: name, colorHex: colorHex, size: 28)
                 .padding(.top, 2)
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(name)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color(hex: colorHex) ?? .primary)
-                    
+
                     Text(message.timestamp, style: .time)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-                
+
                 Text(parsed.primaryText)
                     .font(.system(size: 13))
                     .padding(.horizontal, 12)
@@ -275,8 +575,11 @@ private struct GroupMessageBubble: View {
                 if let details = parsed.detailsText {
                     detailsDisclosure(details)
                 }
+                if let cards = message.thinkingProcess, !cards.isEmpty {
+                    thinkingProcessDisclosure(cards)
+                }
             }
-            
+
             Spacer(minLength: 40)
         }
     }
@@ -307,6 +610,54 @@ private struct GroupMessageBubble: View {
             Text("Show details")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func thinkingProcessDisclosure(_ cards: [GroupMessage.ThinkingCard]) -> some View {
+        DisclosureGroup(isExpanded: $showThinking) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(cards.enumerated()), id: \.offset) { _, card in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: thinkingIconName(card.kind))
+                            .font(.system(size: 10))
+                            .foregroundStyle(thinkingIconColor(card.kind))
+                            .frame(width: 12)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(card.text)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                            Text(card.ts, style: .time)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            Text("Thinking process (\(cards.count))")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func thinkingIconName(_ kind: String) -> String {
+        switch kind {
+        case "thought": return "brain"
+        case "action": return "wrench.and.screwdriver"
+        case "result": return "checkmark.circle"
+        default: return "circle"
+        }
+    }
+
+    private func thinkingIconColor(_ kind: String) -> Color {
+        switch kind {
+        case "thought": return .indigo
+        case "action": return .orange
+        case "result": return .green
+        default: return .secondary
         }
     }
 }

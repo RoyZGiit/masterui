@@ -157,4 +157,18 @@ class GroupChatCoordinator: ObservableObject {
         }
     }
 
+    // MARK: - Realtime Events
+
+    /// Applies a single realtime event from backend streaming.
+    func receiveRealtimeEvent(_ event: GroupChatRealtimeEvent) {
+        groupSession.applyRealtimeEvent(event)
+    }
+
+    /// Applies a batch of realtime events from backend replay/streaming.
+    func receiveRealtimeEvents(_ events: [GroupChatRealtimeEvent]) {
+        for event in events {
+            groupSession.applyRealtimeEvent(event)
+        }
+    }
+
 }

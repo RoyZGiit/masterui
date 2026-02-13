@@ -53,6 +53,8 @@ class ParticipantController: ObservableObject {
     private struct TurnContext {
         let token: UUID
         let turnID: UUID
+        let runID: String
+        let agentID: String
         let injectedAtSequence: Int
         let payload: String
         var injectionStartRow: Int
@@ -105,6 +107,10 @@ class ParticipantController: ObservableObject {
     private var postedTurnIDs = Set<UUID>()
     private var postedFingerprints = Set<String>()
 
+    private static func nextEventID() -> String {
+        "evt_\(UUID().uuidString.lowercased())"
+    }
+
     init(
         sessionID: UUID,
         groupSession: GroupChatSession,
@@ -147,6 +153,57 @@ class ParticipantController: ObservableObject {
         if debugEvents.count > 50 {
             debugEvents.removeFirst(debugEvents.count - 50)
         }
+    }
+
+    private func agentIdentifier() -> String {
+        let labels = sessionManager.map { groupSession.participantDisplayNames(sessionManager: $0) } ?? [:]
+        return labels[sessionID] ?? cliSession?.target.name ?? sessionID.uuidString
+    }
+
+    private func emitStatus(
+        runID: String,
+        agentID: String,
+        status: GroupChatAgentStatus,
+        phaseText: String? = nil
+    ) {
+        groupSession.applyRealtimeEvent(
+            .agentStatus(
+                GroupChatAgentStatusEvent(
+                    eventId: Self.nextEventID(),
+                    runId: runID,
+                    agentId: agentID,
+                    status: status,
+                    phaseText: phaseText,
+                    ts: Date(),
+                    ephemeral: true,
+                    persist: false
+                )
+            )
+        )
+    }
+
+    private func emitEphemeralMessage(
+        runID: String,
+        agentID: String,
+        kind: GroupChatEphemeralKind,
+        text: String,
+        meta: [String: String] = [:]
+    ) {
+        groupSession.applyRealtimeEvent(
+            .ephemeralMessage(
+                GroupChatEphemeralMessageEvent(
+                    eventId: Self.nextEventID(),
+                    runId: runID,
+                    agentId: agentID,
+                    kind: kind,
+                    text: text,
+                    meta: meta,
+                    ts: Date(),
+                    ephemeral: true,
+                    persist: false
+                )
+            )
+        )
     }
 
     // MARK: - Start Observing
@@ -258,8 +315,17 @@ class ParticipantController: ObservableObject {
         // Build and inject the payload
         refreshDebugStatus(inputLoop: .injecting)
         let payload = buildPayload(newMessages: relevantNew)
+        let runID = UUID().uuidString.lowercased()
+        let agentID = agentIdentifier()
+        emitStatus(runID: runID, agentID: agentID, status: .queued, phaseText: "queued \(relevantNew.count) message(s)")
+        emitEphemeralMessage(
+            runID: runID,
+            agentID: agentID,
+            kind: .thought,
+            text: "Preparing prompt from \(relevantNew.count) new message(s)"
+        )
         logDebugEvent(.messageInjected, detail: "\(relevantNew.count) msg(s), seq \(groupSession.sequence)")
-        injectPayload(payload)
+        injectPayload(payload, runID: runID, agentID: agentID)
     }
 
     // MARK: - Payload Construction
@@ -300,7 +366,7 @@ class ParticipantController: ObservableObject {
 
     // MARK: - Inject & Capture
 
-    private func injectPayload(_ payload: String) {
+    private func injectPayload(_ payload: String, runID: String, agentID: String) {
         guard let termView = TerminalViewCache.shared.terminalView(for: sessionID) else { return }
         let coordinator = TerminalViewCache.shared.coordinator(for: sessionID)
         let token = UUID()
@@ -308,9 +374,13 @@ class ParticipantController: ObservableObject {
 
         lastSeenSequence = groupSession.sequence
         isProcessing = true
+        emitStatus(runID: runID, agentID: agentID, status: .running, phaseText: "injecting prompt")
+        emitEphemeralMessage(runID: runID, agentID: agentID, kind: .action, text: "Prompt injected into terminal")
         activeTurn = TurnContext(
             token: token,
             turnID: UUID(),
+            runID: runID,
+            agentID: agentID,
             injectedAtSequence: lastSeenSequence,
             payload: payload,
             injectionStartRow: startRow
@@ -335,6 +405,7 @@ class ParticipantController: ObservableObject {
 
             // Record where to start reading the response buffer.
             self.activeTurn?.injectionStartRow = termView.currentScrollInvariantRow()
+            self.emitStatus(runID: runID, agentID: agentID, status: .thinking, phaseText: "waiting for model output")
             self.refreshDebugStatus(inputLoop: .idle, outputLoop: .polling)
         }
     }
@@ -343,12 +414,16 @@ class ParticipantController: ObservableObject {
         guard let session = cliSession,
               let termView = TerminalViewCache.shared.terminalView(for: sessionID),
               let turn = activeTurn else {
+            if let turn = activeTurn {
+                emitStatus(runID: turn.runID, agentID: turn.agentID, status: .error, phaseText: "lost terminal/session handle")
+            }
             isProcessing = false
             refreshDebugStatus(outputLoop: .idle)
             return
         }
 
         refreshDebugStatus(outputLoop: .capturing)
+        emitStatus(runID: turn.runID, agentID: turn.agentID, status: .toolRunning, phaseText: "capturing terminal output")
 
         // Read the terminal buffer from where injection output started.
         let rawOutput = termView.getBufferText(fromRow: turn.injectionStartRow, excludePromptLine: true)
@@ -359,6 +434,19 @@ class ParticipantController: ObservableObject {
             return
         }
 
+        emitStatus(runID: turn.runID, agentID: turn.agentID, status: .summarizing, phaseText: "finalizing response")
+        emitEphemeralMessage(
+            runID: turn.runID,
+            agentID: turn.agentID,
+            kind: .result,
+            text: String(content.prefix(200))
+        )
+
+        // Save turn info before clearing — we need runID/agentID for folding.
+        let savedRunID = turn.runID
+        let savedAgentID = turn.agentID
+        let savedTurnID = turn.turnID
+
         clearActiveTurn(resetProcessing: true)
 
         // PASS protocol: AI has nothing to add — skip posting and don't notify others.
@@ -367,6 +455,9 @@ class ParticipantController: ObservableObject {
             debugStatus.consecutivePassCount = consecutivePassCount
             logDebugEvent(.passDetected, detail: "consecutive #\(consecutivePassCount)")
             onPassStateChanged?(sessionID, true)
+            emitStatus(runID: savedRunID, agentID: savedAgentID, status: .done, phaseText: "PASS")
+            // Remove the ephemeral run for PASS responses too.
+            groupSession.removeEphemeralRun(id: "\(savedRunID)::\(savedAgentID)")
             refreshDebugStatus(outputLoop: .idle)
             // Don't blindly advance lastSeenSequence — messages from users or
             // other AIs may have arrived while we were processing. Let the
@@ -383,18 +474,45 @@ class ParticipantController: ObservableObject {
 
         // Post the response back to the group
         let labels = sessionManager.map { groupSession.participantDisplayNames(sessionManager: $0) } ?? [:]
+
+        // Fold ephemeral run cards into the message as thinkingProcess.
+        let runKey = "\(savedRunID)::\(savedAgentID)"
+        let thinkingCards: [GroupMessage.ThinkingCard]? = groupSession.ephemeralRunCards(
+            runId: savedRunID, agentId: savedAgentID
+        )?.map { card in
+            GroupMessage.ThinkingCard(kind: card.kind.rawValue, text: card.text, ts: card.ts)
+        }
+
         let aiMessage = GroupMessage(
             source: .ai(
                 name: labels[sessionID] ?? session.target.name,
                 sessionID: sessionID,
                 colorHex: session.target.colorHex
             ),
-            content: content
+            content: content,
+            thinkingProcess: thinkingCards
         )
-        guard postedTurnIDs.insert(turn.turnID).inserted else { return }
-        let fingerprint = "\(sessionID.uuidString):\(turn.turnID.uuidString):\(Self.dedupeKey(for: content))"
+        guard postedTurnIDs.insert(savedTurnID).inserted else { return }
+        let fingerprint = "\(sessionID.uuidString):\(savedTurnID.uuidString):\(Self.dedupeKey(for: content))"
         guard postedFingerprints.insert(fingerprint).inserted else { return }
         groupSession.appendMessage(aiMessage)
+        groupSession.applyRealtimeEvent(
+            .assistantMessage(
+                GroupChatAssistantMessageEvent(
+                    eventId: Self.nextEventID(),
+                    runId: savedRunID,
+                    agentId: savedAgentID,
+                    messageId: aiMessage.id.uuidString,
+                    content: content,
+                    ts: Date(),
+                    ephemeral: false,
+                    persist: true
+                )
+            )
+        )
+        // Remove the ephemeral run now that it's folded into the message.
+        groupSession.removeEphemeralRun(id: runKey)
+        emitStatus(runID: savedRunID, agentID: savedAgentID, status: .done)
 
         // Persist history
         historyStore.save(groupSession)
