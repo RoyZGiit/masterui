@@ -1,25 +1,69 @@
 import SwiftUI
 
+// MARK: - SidebarItem
+
+enum SidebarItem: Identifiable, Hashable {
+    case cli(UUID)
+    case group(UUID)
+
+    var id: String {
+        switch self {
+        case .cli(let uuid): return "cli-\(uuid.uuidString)"
+        case .group(let uuid): return "group-\(uuid.uuidString)"
+        }
+    }
+
+    var uuid: UUID {
+        switch self {
+        case .cli(let uuid): return uuid
+        case .group(let uuid): return uuid
+        }
+    }
+}
+
 // MARK: - SessionSidebarView
 
-/// IM-style sidebar listing all CLI sessions.
+/// IM-style sidebar listing all CLI sessions and Group chats.
 struct SessionSidebarView: View {
-    @ObservedObject var sessionManager: CLISessionManager
+    @ObservedObject var appState = AppState.shared
+    @ObservedObject private var sessionManager = AppState.shared.cliSessionManager
+    @ObservedObject private var groupChatManager = AppState.shared.groupChatManager
     var onRename: (UUID, String) -> Void
     var onReload: (UUID) -> Void
     var onSelectClosedSession: ((ClosedSession) -> Void)?
     @State private var showNewSessionSheet = false
+    @State private var showNewGroupChatSheet = false
     @State private var closedSectionExpanded = true
+
+    private var sortedItems: [SidebarItem] {
+        let cliItems = sessionManager.sessions.map { (SidebarItem.cli($0.id), cliSortDate(for: $0)) }
+        let groupItems = groupChatManager.groupChats.map { (SidebarItem.group($0.id), groupSortDate(for: $0)) }
+
+        return (cliItems + groupItems)
+            .sorted {
+                if $0.1 != $1.1 { return $0.1 > $1.1 }
+                return $0.0.id > $1.0.id
+            }
+            .map { $0.0 }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Sessions")
+                Text("Chats")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(action: { showNewSessionSheet = true }) {
+                
+                Menu {
+                    Button(action: { showNewSessionSheet = true }) {
+                        Label("New Session", systemImage: "terminal")
+                    }
+                    Button(action: { showNewGroupChatSheet = true }) {
+                        Label("New Group Chat", systemImage: "person.3")
+                    }
+                } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(Color.accentColor)
@@ -27,8 +71,8 @@ struct SessionSidebarView: View {
                         .background(Color.accentColor.opacity(0.15))
                         .clipShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .help("New Session (Cmd+T)")
+                .menuStyle(.borderlessButton)
+                .help("New Session or Group Chat")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -36,32 +80,76 @@ struct SessionSidebarView: View {
             Divider()
 
             // Session list
-            if sessionManager.sessions.isEmpty && sessionManager.closedSessions.isEmpty {
+            if sortedItems.isEmpty &&
+                sessionManager.closedSessions.isEmpty &&
+                groupChatManager.closedGroupChats.isEmpty {
                 emptySidebar
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(sessionManager.sessions) { session in
-                            SessionRowView(
-                                session: session,
-                                isSelected: session.id == sessionManager.focusedSessionID,
-                                onSelect: { sessionManager.focusSession(session.id) },
-                                onRename: { onRename(session.id, $0) },
-                                onReload: { onReload(session.id) },
-                                onClose: { sessionManager.closeSession(session.id) }
-                            )
+                        ForEach(sortedItems) { item in
+                            switch item {
+                            case .cli(let id):
+                                if let session = sessionManager.sessions.first(where: { $0.id == id }) {
+                                    SessionRowView(
+                                        session: session,
+                                        isSelected: appState.viewMode == .cliSessions && session.id == sessionManager.focusedSessionID,
+                                        onSelect: {
+                                            appState.viewMode = .cliSessions
+                                            sessionManager.focusSession(session.id)
+                                        },
+                                        onRename: { onRename(session.id, $0) },
+                                        onReload: { onReload(session.id) },
+                                        onClose: { sessionManager.closeSession(session.id) }
+                                    )
+                                }
+                            case .group(let id):
+                                if let chat = groupChatManager.groupChats.first(where: { $0.id == id }) {
+                                    GroupChatRowView(
+                                        chat: chat,
+                                        isSelected: appState.viewMode == .groupChat && chat.id == groupChatManager.activeGroupChatID,
+                                        onSelect: {
+                                            appState.viewMode = .groupChat
+                                            groupChatManager.focusGroupChat(chat.id)
+                                        },
+                                        onClose: {
+                                            groupChatManager.closeGroupChat(id: chat.id)
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
 
                     // Recently Closed section
-                    if !sessionManager.closedSessions.isEmpty {
+                    if !sessionManager.closedSessions.isEmpty || !groupChatManager.closedGroupChats.isEmpty {
                         Divider()
                             .padding(.vertical, 4)
 
                         DisclosureGroup(isExpanded: $closedSectionExpanded) {
                             LazyVStack(spacing: 2) {
+                                ForEach(groupChatManager.closedGroupChats) { closed in
+                                    ClosedGroupChatRowView(
+                                        closedGroupChat: closed,
+                                        canRestore: groupChatManager.canRestoreClosedGroupChat(
+                                            closed.id,
+                                            sessionManager: sessionManager
+                                        ),
+                                        onRestore: {
+                                            let restored = groupChatManager.restoreClosedGroupChat(
+                                                closed.id,
+                                                sessionManager: sessionManager
+                                            )
+                                            if restored {
+                                                appState.viewMode = .groupChat
+                                            }
+                                        },
+                                        onDelete: { groupChatManager.permanentlyDeleteClosedGroupChat(closed.id) }
+                                    )
+                                }
+
                                 ForEach(sessionManager.closedSessions) { closed in
                                     ClosedSessionRowView(
                                         closedSession: closed,
@@ -73,7 +161,10 @@ struct SessionSidebarView: View {
                                 }
                             }
 
-                            Button(action: { sessionManager.clearAllClosedSessions() }) {
+                            Button(action: {
+                                groupChatManager.clearAllClosedGroupChats()
+                                sessionManager.clearAllClosedSessions()
+                            }) {
                                 HStack {
                                     Image(systemName: "trash")
                                         .font(.system(size: 10))
@@ -91,7 +182,7 @@ struct SessionSidebarView: View {
                                     .font(.system(size: 10))
                                 Text("Recently Closed")
                                     .font(.system(size: 11, weight: .medium))
-                                Text("\(sessionManager.closedSessions.count)")
+                                Text("\(sessionManager.closedSessions.count + groupChatManager.closedGroupChats.count)")
                                     .font(.system(size: 9, weight: .medium))
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
@@ -109,6 +200,13 @@ struct SessionSidebarView: View {
         .background(Color.primary.opacity(0.03))
         .sheet(isPresented: $showNewSessionSheet) {
             NewCLISessionSheet(sessionManager: sessionManager)
+        }
+        .sheet(isPresented: $showNewGroupChatSheet) {
+            NewGroupChatSheet(
+                manager: groupChatManager,
+                sessionManager: sessionManager,
+                isPresented: $showNewGroupChatSheet
+            )
         }
     }
 
@@ -128,6 +226,14 @@ struct SessionSidebarView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func cliSortDate(for session: CLISession) -> Date {
+        session.history.blocks.last?.timestamp ?? session.history.updatedAt
+    }
+
+    private func groupSortDate(for chat: GroupChatSession) -> Date {
+        chat.messages.last?.timestamp ?? chat.createdAt
     }
 }
 
@@ -259,6 +365,84 @@ struct SessionRowView: View {
     }
 }
 
+// MARK: - GroupChatRowView
+
+struct GroupChatRowView: View {
+    @ObservedObject var chat: GroupChatSession
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(Color.purple.opacity(0.2))
+                    .frame(width: 24, height: 24)
+                Image(systemName: "person.3.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.purple)
+            }
+
+            // Chat info
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(chat.title)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+
+                    if chat.hasUnreadActivity {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                    }
+                }
+
+                Text("\(chat.participantSessionIDs.count) participants")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+
+            // Time
+            Text(chat.lastActivityDate, style: .relative)
+                .font(.system(size: 9))
+                .foregroundStyle(.quaternary)
+                .lineLimit(1)
+
+            // Close button on hover
+            if isHovering || isSelected {
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.12) :
+                      isHovering ? Color.primary.opacity(0.04) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .contextMenu {
+            Button("Close Group Chat", role: .destructive) {
+                onClose()
+            }
+        }
+    }
+}
+
 // MARK: - ClosedSessionRowView
 
 /// Row for a closed session in the recycle bin section.
@@ -337,6 +521,90 @@ struct ClosedSessionRowView: View {
                 onSelect()
             }
             Button("Restore Session") {
+                onRestore()
+            }
+            .disabled(!canRestore)
+            Divider()
+            Button("Delete Permanently", role: .destructive) {
+                onDelete()
+            }
+        }
+    }
+}
+
+// MARK: - ClosedGroupChatRowView
+
+/// Row for a closed group chat in the recycle bin section.
+struct ClosedGroupChatRowView: View {
+    let closedGroupChat: ClosedGroupChat
+    let canRestore: Bool
+    let onRestore: () -> Void
+    let onDelete: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.3")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(closedGroupChat.title)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 4) {
+                    Text("\(closedGroupChat.participantSessionIDs.count) participants")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+
+                    if closedGroupChat.messageCount > 0 {
+                        Text("\(closedGroupChat.messageCount) messages")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.quaternary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Text(closedGroupChat.updatedAt, style: .relative)
+                .font(.system(size: 9))
+                .foregroundStyle(.quaternary)
+                .lineLimit(1)
+
+            if isHovering {
+                Button(action: onRestore) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(canRestore ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRestore)
+                .help(canRestore ? "Restore group chat" : "Cannot restore: participant sessions unavailable")
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Delete permanently")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isHovering ? Color.primary.opacity(0.04) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .contextMenu {
+            Button("Restore Group Chat") {
                 onRestore()
             }
             .disabled(!canRestore)

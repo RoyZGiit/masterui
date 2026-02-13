@@ -55,6 +55,7 @@ class CLISession: ObservableObject, Identifiable {
         // Try to load existing history or create empty
         if let existing = SessionHistoryStore.shared.load(sessionID: id) {
             self.history = existing
+            self.lastActivityDate = existing.updatedAt
             if let savedTitle = existing.customTitle {
                 self.title = savedTitle
                 self.isCustomTitle = true

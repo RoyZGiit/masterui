@@ -1,34 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - CLILayoutView
+// MARK: - CLIMainArea
 
-/// The main layout container for CLI terminal sessions.
-/// Uses HSplitView with a sidebar (IM-style session list) and terminal area.
-struct CLILayoutView: View {
+/// The main content area for CLI terminal sessions.
+struct CLIMainArea: View {
     @ObservedObject var sessionManager: CLISessionManager
     @State private var showNewSessionSheet = false
     @State private var selectedClosedSession: ClosedSession?
 
     var body: some View {
-        HSplitView {
-            // Left: Session sidebar
-            SessionSidebarView(
-                sessionManager: sessionManager,
-                onRename: { sessionID, title in
-                    sessionManager.renameSession(sessionID, title: title)
-                },
-                onReload: { sessionID in
-                    sessionManager.reloadSession(sessionID)
-                },
-                onSelectClosedSession: { closed in
-                    selectedClosedSession = closed
-                    sessionManager.focusedSessionID = nil
-                }
-            )
-                .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
-
-            // Right: Terminal area or closed session history
+        Group {
+            // Main Area: Terminal area or closed session history
             if let closed = selectedClosedSession {
                 ClosedSessionHistoryView(closedSession: closed)
             } else if let session = sessionManager.focusedSession {
@@ -55,6 +38,13 @@ struct CLILayoutView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newCLISession)) { _ in
             showNewSessionSheet = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectClosedSession)) { notification in
+            if let closed = notification.object as? ClosedSession {
+                selectedClosedSession = closed
+                sessionManager.focusedSessionID = nil
+                AppState.shared.viewMode = .cliSessions
+            }
         }
         .onChange(of: sessionManager.focusedSessionID) {
             if sessionManager.focusedSessionID != nil {

@@ -113,6 +113,7 @@ class FloatingPanel: NSPanel {
 extension Notification.Name {
     static let newCLISession = Notification.Name("MasterUI.newCLISession")
     static let togglePanelMaximize = Notification.Name("MasterUI.togglePanelMaximize")
+    static let selectClosedSession = Notification.Name("MasterUI.selectClosedSession")
 }
 
 // MARK: - FloatingPanelController

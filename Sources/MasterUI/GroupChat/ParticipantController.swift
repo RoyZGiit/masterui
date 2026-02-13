@@ -24,6 +24,25 @@ struct ParticipantDebugStatus {
     var groupSequence: Int = 0
     var isProcessing: Bool = false
     var isStableIdle: Bool = false
+    var consecutivePassCount: Int = 0
+}
+
+// MARK: - Debug Event
+
+enum DebugEventType: String {
+    case messageInjected = "injected"
+    case outputCaptured = "captured"
+    case passDetected = "PASS"
+    case waitingForInput = "waiting"
+    case stableIdleReached = "stableIdle"
+    case noNewMessages = "noNew"
+}
+
+struct DebugEvent: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let type: DebugEventType
+    let detail: String
 }
 
 // MARK: - ParticipantController
@@ -52,6 +71,16 @@ class ParticipantController: ObservableObject {
 
     /// Debug status for the loop state display.
     @Published var debugStatus = ParticipantDebugStatus()
+
+    /// Recent debug events for the debug panel (capped at 50).
+    @Published var debugEvents: [DebugEvent] = []
+
+    /// Number of consecutive PASS responses from this participant.
+    @Published var consecutivePassCount: Int = 0
+
+    /// Callback invoked when a PASS is detected or a real response is posted.
+    /// The coordinator uses this to track stall state.
+    var onPassStateChanged: ((_ sessionID: UUID, _ didPass: Bool) -> Void)?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -109,6 +138,15 @@ class ParticipantController: ObservableObject {
         s.isProcessing = isProcessing
         s.isStableIdle = isStableIdle
         debugStatus = s
+    }
+
+    /// Appends a debug event, capping the array at 50 entries.
+    private func logDebugEvent(_ type: DebugEventType, detail: String) {
+        let event = DebugEvent(timestamp: Date(), type: type, detail: detail)
+        debugEvents.append(event)
+        if debugEvents.count > 50 {
+            debugEvents.removeFirst(debugEvents.count - 50)
+        }
     }
 
     // MARK: - Start Observing
@@ -178,6 +216,7 @@ class ParticipantController: ObservableObject {
             refreshDebugStatus(inputLoop: .idle)
             return
         }
+        logDebugEvent(.stableIdleReached, detail: "checking for messages")
         refreshDebugStatus(inputLoop: .polling)
         checkForNewMessages()
     }
@@ -211,6 +250,7 @@ class ParticipantController: ObservableObject {
             if !newMessages.isEmpty {
                 lastSeenSequence = groupSession.sequence
             }
+            logDebugEvent(.noNewMessages, detail: "seq \(groupSession.sequence), seen \(lastSeenSequence)")
             refreshDebugStatus(inputLoop: .idle)
             return
         }
@@ -218,6 +258,7 @@ class ParticipantController: ObservableObject {
         // Build and inject the payload
         refreshDebugStatus(inputLoop: .injecting)
         let payload = buildPayload(newMessages: relevantNew)
+        logDebugEvent(.messageInjected, detail: "\(relevantNew.count) msg(s), seq \(groupSession.sequence)")
         injectPayload(payload)
     }
 
@@ -231,10 +272,30 @@ class ParticipantController: ObservableObject {
             .map { labels[$0] ?? "AI" }
         let historyPath = historyStore.historyFilePath(for: groupSession)
 
+        let inlineMessages = Self.formatMessagesForPayload(newMessages, labels: labels)
+
         return """
         [Group Chat] You are "\(myName)", participants: \(otherNames.joined(separator: ", ")). History: \(historyPath)
-        Please review the chat history and decide what to do next. If there is nothing to say or do, reply with exactly "[PASS]".
+        New messages since your last response:
+        \(inlineMessages)
+        Reply if you have something meaningful to contribute. If you have nothing to add, reply with exactly "[PASS]".
         """
+    }
+
+    /// Formats messages inline so the AI sees content directly without reading a file.
+    private static func formatMessagesForPayload(_ messages: [GroupMessage], labels: [UUID: String]) -> String {
+        messages.map { msg in
+            let sender: String
+            switch msg.source {
+            case .user:
+                sender = "User"
+            case .ai(let name, let sid, _):
+                sender = labels[sid] ?? name
+            case .system:
+                sender = "System"
+            }
+            return "[\(sender)]: \(msg.content)"
+        }.joined(separator: "\n")
     }
 
     // MARK: - Inject & Capture
@@ -302,6 +363,10 @@ class ParticipantController: ObservableObject {
 
         // PASS protocol: AI has nothing to add — skip posting and don't notify others.
         if Self.isPassResponse(content) {
+            consecutivePassCount += 1
+            debugStatus.consecutivePassCount = consecutivePassCount
+            logDebugEvent(.passDetected, detail: "consecutive #\(consecutivePassCount)")
+            onPassStateChanged?(sessionID, true)
             refreshDebugStatus(outputLoop: .idle)
             // Don't blindly advance lastSeenSequence — messages from users or
             // other AIs may have arrived while we were processing. Let the
@@ -309,6 +374,12 @@ class ParticipantController: ObservableObject {
             checkForNewMessages()
             return
         }
+
+        // Real response — reset consecutive PASS count
+        consecutivePassCount = 0
+        debugStatus.consecutivePassCount = 0
+        onPassStateChanged?(sessionID, false)
+        logDebugEvent(.outputCaptured, detail: "\(content.prefix(80))...")
 
         // Post the response back to the group
         let labels = sessionManager.map { groupSession.participantDisplayNames(sessionManager: $0) } ?? [:]
@@ -612,12 +683,23 @@ class ParticipantController: ObservableObject {
     }
 
     /// Returns true if the cleaned response is a PASS signal (AI has nothing to add).
-    /// Lenient: any line containing a PASS marker counts, since AI tools often emit
-    /// thinking/exploration text or TUI chrome alongside the signal (e.g. "✦ [PASS]").
+    /// Checks only the LAST non-empty line, so a response that merely *discusses*
+    /// [PASS] (e.g. "implement the [PASS] UI") is not treated as a skip.
     static func isPassResponse(_ content: String) -> Bool {
-        let lower = content.lowercased()
-        return lower.contains("[pass]") || lower.contains("\npass\n")
-            || lower.hasSuffix("\npass") || lower == "pass"
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // If the entire content is just "[PASS]" or "PASS", it's a pass.
+        let lower = trimmed.lowercased()
+        if lower == "[pass]" || lower == "pass" { return true }
+
+        // Check the last non-empty line only — the AI's final verdict.
+        let lines = trimmed.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let lastLine = lines.last(where: { !$0.isEmpty }) else { return false }
+        let lastLower = lastLine.lowercased()
+        return lastLower == "[pass]" || lastLower == "pass"
+            || lastLower.hasSuffix("[pass]") || lastLower.hasSuffix("pass]")
     }
 
     // MARK: - User Control

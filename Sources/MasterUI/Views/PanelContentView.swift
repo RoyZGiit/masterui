@@ -14,16 +14,38 @@ struct PanelContentView: View {
             Divider()
 
             // Main Content Area
-            switch appState.viewMode {
-            case .settings:
+            if appState.viewMode == .settings {
                 SettingsView()
-            case .cliSessions:
-                CLILayoutView(sessionManager: appState.cliSessionManager)
-            case .groupChat:
-                GroupChatLayoutView(
-                    manager: appState.groupChatManager,
-                    sessionManager: appState.cliSessionManager
-                )
+            } else {
+                HSplitView {
+                    // Left: Unified Sidebar
+                    SessionSidebarView(
+                        onRename: { sessionID, title in
+                            appState.cliSessionManager.renameSession(sessionID, title: title)
+                        },
+                        onReload: { sessionID in
+                            appState.cliSessionManager.reloadSession(sessionID)
+                        },
+                        onSelectClosedSession: { closed in
+                            // This state might need to be shared or handled
+                            // For now, we can pass it to CLILayoutView or handle it here
+                            NotificationCenter.default.post(name: .selectClosedSession, object: closed)
+                        }
+                    )
+                    .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
+
+                    // Right: Main Area
+                    Group {
+                        if appState.viewMode == .groupChat {
+                            GroupChatMainArea(
+                                manager: appState.groupChatManager,
+                                sessionManager: appState.cliSessionManager
+                            )
+                        } else {
+                            CLIMainArea(sessionManager: appState.cliSessionManager)
+                        }
+                    }
+                }
             }
         }
         .frame(minWidth: appState.viewMode == .settings ? 480 : 700,
@@ -45,23 +67,6 @@ struct PanelContentView: View {
                 .foregroundStyle(.primary)
 
             Spacer()
-
-            // Group Chat Toggle
-            Button(action: {
-                withAnimation(.snappy) {
-                    if appState.viewMode == .groupChat {
-                        appState.viewMode = .cliSessions
-                    } else {
-                        appState.viewMode = .groupChat
-                    }
-                }
-            }) {
-                Image(systemName: "person.3.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(appState.viewMode == .groupChat ? .primary : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help(appState.viewMode == .groupChat ? "Back to Sessions" : "Group Chat")
 
             // Settings Toggle
             Button(action: {

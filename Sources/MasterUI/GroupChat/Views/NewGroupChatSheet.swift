@@ -57,21 +57,24 @@ struct NewGroupChatSheet: View {
                             .foregroundStyle(.tertiary)
                             .padding(.vertical, 8)
                     } else {
-                        VStack(spacing: 4) {
-                            ForEach(availableSessions) { session in
-                                SessionSelectionRow(
-                                    session: session,
-                                    isSelected: selectedSessionIDs.contains(session.id),
-                                    onToggle: {
-                                        if selectedSessionIDs.contains(session.id) {
-                                            selectedSessionIDs.remove(session.id)
-                                        } else {
-                                            selectedSessionIDs.insert(session.id)
+                        ScrollView {
+                            LazyVStack(spacing: 4) {
+                                ForEach(availableSessions) { session in
+                                    SessionSelectionRow(
+                                        session: session,
+                                        isSelected: selectedSessionIDs.contains(session.id),
+                                        onToggle: {
+                                            if selectedSessionIDs.contains(session.id) {
+                                                selectedSessionIDs.remove(session.id)
+                                            } else {
+                                                selectedSessionIDs.insert(session.id)
+                                            }
                                         }
-                                    }
-                                )
+                                    )
+                                }
                             }
                         }
+                        .frame(maxHeight: 220)
                     }
                 }
             }

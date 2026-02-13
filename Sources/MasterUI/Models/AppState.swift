@@ -84,6 +84,7 @@ class AppState: ObservableObject {
 
         restorePersistedCLISessions()
         cliSessionManager.refreshClosedSessions()
+        groupChatManager.refreshClosedGroupChats()
 
         // Set up persistence listener AFTER initial restoration to avoid redundant writes
         cliSessionManager.onSessionsChanged = { [weak self] in

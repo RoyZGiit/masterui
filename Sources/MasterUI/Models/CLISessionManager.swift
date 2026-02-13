@@ -23,6 +23,7 @@ class CLISessionManager: ObservableObject {
     @Published var focusedSessionID: UUID?
     @Published var closedSessions: [ClosedSession] = []
     var onSessionsChanged: (() -> Void)?
+    private var sessionChangeCancellables: [UUID: AnyCancellable] = [:]
 
     /// Available CLI targets the user can create sessions for.
     var availableCLITargets: [AITarget] {
@@ -57,6 +58,7 @@ class CLISessionManager: ObservableObject {
             focusedSessionID = session.id
         }
 
+        observeSessionChanges(session)
         onSessionsChanged?()
 
         return session
@@ -75,6 +77,7 @@ class CLISessionManager: ObservableObject {
         TerminalViewCache.shared.remove(sessionID: id)
 
         sessions.removeAll { $0.id == id }
+        sessionChangeCancellables[id] = nil
 
         // If we closed the focused session, focus the last remaining one
         if focusedSessionID == id {
@@ -234,5 +237,14 @@ class CLISessionManager: ObservableObject {
             SessionHistoryStore.shared.delete(sessionID: closed.id)
         }
         closedSessions.removeAll()
+    }
+
+    // MARK: - Private
+
+    private func observeSessionChanges(_ session: CLISession) {
+        sessionChangeCancellables[session.id] = session.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
     }
 }

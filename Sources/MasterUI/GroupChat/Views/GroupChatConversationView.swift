@@ -39,6 +39,11 @@ struct GroupChatConversationView: View {
                             .id(message.id)
                         }
 
+                        // Stall banner
+                        if coordinator.isStalled {
+                            stalledBanner
+                        }
+
                         // Active processing indicator
                         if coordinator.isConversationActive {
                             pendingIndicator
@@ -84,6 +89,18 @@ struct GroupChatConversationView: View {
 
             Spacer()
 
+            // Stall badge
+            if coordinator.isStalled {
+                Text("Stalled")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.orange, in: Capsule())
+                    .help("All AIs passed — conversation stalled")
+                    .transition(.opacity.combined(with: .scale))
+            }
+
             // Stop button when conversation is active
             if coordinator.isConversationActive {
                 Button(action: { coordinator.stopAll() }) {
@@ -128,6 +145,23 @@ struct GroupChatConversationView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    // MARK: - Stalled Banner
+
+    private var stalledBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text("Conversation stalled — all AIs passed. Send a message to continue.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.top, 4)
     }
 
     // MARK: - Pending Indicator
@@ -315,6 +349,7 @@ struct AvatarView: View {
 private struct ParticipantDebugPanel: View {
     @ObservedObject var coordinator: GroupChatCoordinator
     @ObservedObject var sessionManager: CLISessionManager
+    @State private var showEventLog = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -322,7 +357,29 @@ private struct ParticipantDebugPanel: View {
                 Text("Loop Debug")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
+
+                if coordinator.isStalled {
+                    Text("STALLED")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.orange, in: RoundedRectangle(cornerRadius: 3))
+                }
+
                 Spacer()
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showEventLog.toggle()
+                    }
+                } label: {
+                    Text(showEventLog ? "Hide Events" : "Events")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+
                 Text("seq: \(coordinator.groupSession.sequence)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
@@ -335,6 +392,23 @@ private struct ParticipantDebugPanel: View {
                         controller: controller,
                         sessionManager: sessionManager
                     )
+                }
+            }
+
+            if showEventLog {
+                Divider()
+                Text("Event Log")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+
+                ForEach(coordinator.groupSession.participantSessionIDs, id: \.self) { sessionID in
+                    if let controller = coordinator.controllers[sessionID] {
+                        ParticipantEventLog(
+                            sessionID: sessionID,
+                            controller: controller,
+                            sessionManager: sessionManager
+                        )
+                    }
                 }
             }
         }
@@ -379,6 +453,15 @@ private struct ParticipantLoopRow: View {
                     .foregroundStyle(.orange)
             }
 
+            if status.consecutivePassCount > 0 {
+                Text("PASS:\(status.consecutivePassCount)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Color.orange.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
+            }
+
             if status.isStableIdle {
                 Circle()
                     .fill(Color.green)
@@ -420,6 +503,67 @@ private struct ParticipantLoopRow: View {
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
         .background(color.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
+    }
+}
+
+// MARK: - Participant Event Log
+
+private struct ParticipantEventLog: View {
+    let sessionID: UUID
+    @ObservedObject var controller: ParticipantController
+    @ObservedObject var sessionManager: CLISessionManager
+
+    private var name: String {
+        sessionManager.sessions
+            .first(where: { $0.id == sessionID })?
+            .target.name ?? "?"
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(name)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            if controller.debugEvents.isEmpty {
+                Text("(no events)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(controller.debugEvents.suffix(10)) { event in
+                    HStack(spacing: 4) {
+                        Text(Self.timeFormatter.string(from: event.timestamp))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Text(event.type.rawValue)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(colorForEventType(event.type))
+                        Text(event.detail)
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func colorForEventType(_ type: DebugEventType) -> Color {
+        switch type {
+        case .messageInjected: return .blue
+        case .outputCaptured: return .green
+        case .passDetected: return .orange
+        case .waitingForInput: return .secondary
+        case .stableIdleReached: return .mint
+        case .noNewMessages: return .secondary
+        }
     }
 }
 
