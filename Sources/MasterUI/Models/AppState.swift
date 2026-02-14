@@ -57,10 +57,18 @@ class AppState: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".masterui_cli_sessions.json")
     }()
+    private let groupChatsFileURL: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".masterui_group_chats.json")
+    }()
     private static let lastCLIDirectoryKey = "lastSelectedCLIDirectory"
     private struct CLISessionPersistenceSnapshot: Codable {
         let sessions: [CLISessionManager.RestorableSession]
         let focusedSessionID: UUID?
+    }
+    private struct GroupChatPersistenceSnapshot: Codable {
+        let activeGroupChatIDs: [UUID]
+        let activeGroupChatID: UUID?
     }
 
     // MARK: - Init
@@ -83,12 +91,16 @@ class AppState: ObservableObject {
         selectedTargetID = targets.first(where: { $0.isEnabled })?.id
 
         restorePersistedCLISessions()
+        restorePersistedGroupChats()
         cliSessionManager.refreshClosedSessions()
         groupChatManager.refreshClosedGroupChats()
 
         // Set up persistence listener AFTER initial restoration to avoid redundant writes
         cliSessionManager.onSessionsChanged = { [weak self] in
             self?.saveCLISessionSnapshots()
+        }
+        groupChatManager.onStateChanged = { [weak self] in
+            self?.saveGroupChatSnapshot()
         }
     }
 
@@ -143,7 +155,9 @@ class AppState: ObservableObject {
 
     func persistRuntimeState() {
         saveCLISessionSnapshots()
+        saveGroupChatSnapshot()
         saveAllSessionHistories()
+        saveAllGroupChatHistories()
     }
 
     private func saveAllSessionHistories() {
@@ -154,6 +168,12 @@ class AppState: ObservableObject {
             }
             // Save history to disk
             SessionHistoryStore.shared.save(session.history)
+        }
+    }
+
+    private func saveAllGroupChatHistories() {
+        for chat in groupChatManager.groupChats {
+            GroupChatHistoryStore.shared.save(chat, synchronously: true)
         }
     }
 
@@ -216,6 +236,18 @@ class AppState: ObservableObject {
         }
     }
 
+    private func saveGroupChatSnapshot() {
+        let snapshot = GroupChatPersistenceSnapshot(
+            activeGroupChatIDs: groupChatManager.groupChats.map(\.id),
+            activeGroupChatID: groupChatManager.activeGroupChatID
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        if let data = try? encoder.encode(snapshot) {
+            try? data.write(to: groupChatsFileURL, options: .atomic)
+        }
+    }
+
     private func restorePersistedCLISessions() {
         guard cliEnabled,
               let data = try? Data(contentsOf: cliSessionsFileURL) else {
@@ -240,6 +272,26 @@ class AppState: ObservableObject {
             if let firstID = cliSessionManager.sessions.first?.id {
                 cliSessionManager.focusSession(firstID)
             }
+        }
+    }
+
+    private func restorePersistedGroupChats() {
+        guard cliEnabled,
+              let data = try? Data(contentsOf: groupChatsFileURL) else {
+            return
+        }
+        let decoder = JSONDecoder()
+        guard let snapshot = try? decoder.decode(GroupChatPersistenceSnapshot.self, from: data) else {
+            return
+        }
+
+        for id in snapshot.activeGroupChatIDs {
+            _ = groupChatManager.restoreClosedGroupChat(id, sessionManager: cliSessionManager)
+        }
+
+        if let activeID = snapshot.activeGroupChatID,
+           groupChatManager.groupChats.contains(where: { $0.id == activeID }) {
+            groupChatManager.focusGroupChat(activeID)
         }
     }
 }

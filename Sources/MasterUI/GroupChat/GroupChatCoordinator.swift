@@ -20,6 +20,7 @@ class GroupChatCoordinator: ObservableObject {
 
     private let historyStore: GroupChatHistoryStore
     private var messageCancellable: AnyCancellable?
+    private var participantCancellable: AnyCancellable?
 
     /// Whether any participant is currently processing a response.
     var isConversationActive: Bool {
@@ -40,7 +41,29 @@ class GroupChatCoordinator: ObservableObject {
 
     /// Creates a ParticipantController for each participant and starts observing.
     func setupControllers() {
+        syncControllersToParticipants()
+        startParticipantSync()
+        startListening()
+    }
+
+    private func startParticipantSync() {
+        participantCancellable = groupSession.$participantSessionIDs
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncControllersToParticipants()
+            }
+    }
+
+    func syncControllersToParticipants() {
         guard let sessionManager = sessionManager else { return }
+        let desiredIDs = Set(groupSession.participantSessionIDs)
+
+        let removedIDs = controllers.keys.filter { !desiredIDs.contains($0) }
+        for sessionID in removedIDs {
+            controllers[sessionID]?.shutdown()
+            controllers.removeValue(forKey: sessionID)
+            participantPassState.removeValue(forKey: sessionID)
+        }
 
         for sessionID in groupSession.participantSessionIDs {
             guard controllers[sessionID] == nil else { continue }
@@ -60,8 +83,6 @@ class GroupChatCoordinator: ObservableObject {
             controllers[sessionID] = controller
             controller.startObserving()
         }
-
-        startListening()
     }
 
     // MARK: - Event Subscription
@@ -141,12 +162,22 @@ class GroupChatCoordinator: ObservableObject {
 
     // MARK: - Global Control
 
-    /// Stops all participant controllers.
+    /// Stops all participant controllers' current work while keeping polling alive.
     func stopAll() {
-        messageCancellable?.cancel()
-        messageCancellable = nil
         for (_, controller) in controllers {
             controller.stop()
+        }
+    }
+
+    /// Fully stops message subscription and participant polling.
+    /// Use only when the group chat is being closed.
+    func shutdown() {
+        messageCancellable?.cancel()
+        messageCancellable = nil
+        participantCancellable?.cancel()
+        participantCancellable = nil
+        for (_, controller) in controllers {
+            controller.shutdown()
         }
     }
 
@@ -169,6 +200,10 @@ class GroupChatCoordinator: ObservableObject {
         for event in events {
             groupSession.applyRealtimeEvent(event)
         }
+    }
+
+    deinit {
+        shutdown()
     }
 
 }

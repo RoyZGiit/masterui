@@ -13,6 +13,7 @@ struct GroupChatMainArea: View {
             if let chat = manager.activeGroupChat,
                let coordinator = manager.coordinator(for: chat.id) {
                 GroupChatContentView(
+                    manager: manager,
                     chat: chat,
                     coordinator: coordinator,
                     sessionManager: sessionManager
@@ -33,6 +34,7 @@ struct GroupChatMainArea: View {
 }
 
 private struct GroupChatContentView: View {
+    @ObservedObject var manager: GroupChatManager
     @ObservedObject var chat: GroupChatSession
     @ObservedObject var coordinator: GroupChatCoordinator
     @ObservedObject var sessionManager: CLISessionManager
@@ -44,8 +46,13 @@ private struct GroupChatContentView: View {
             Divider()
             if chat.activeTab == .history {
                 GroupChatHistoryView(chat: chat)
+            } else if chat.activeTab == .settings {
+                GroupChatSettingsView()
+            } else if chat.activeTab == .debug {
+                GroupChatDebugLogView(chat: chat)
             } else {
                 GroupChatConversationView(
+                    manager: manager,
                     chat: chat,
                     coordinator: coordinator,
                     sessionManager: sessionManager
@@ -73,9 +80,11 @@ private struct GroupChatContentView: View {
             Picker("", selection: $chat.activeTab) {
                 Text("Conversation").tag(GroupChatTab.conversation)
                 Text("History").tag(GroupChatTab.history)
+                Text("Settings").tag(GroupChatTab.settings)
+                Text("Debug").tag(GroupChatTab.debug)
             }
             .pickerStyle(.segmented)
-            .frame(width: 220)
+            .frame(width: 380)
 
             Button {
                 if let path = historyPath {

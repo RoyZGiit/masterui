@@ -32,10 +32,14 @@ struct ParticipantDebugStatus {
 enum DebugEventType: String {
     case messageInjected = "injected"
     case outputCaptured = "captured"
+    case pollDecision = "poll"
+    case backendOutput = "backend"
     case passDetected = "PASS"
     case waitingForInput = "waiting"
     case stableIdleReached = "stableIdle"
     case noNewMessages = "noNew"
+    case retryScheduled = "retry"
+    case deliveryFailed = "deliveryFail"
 }
 
 struct DebugEvent: Identifiable {
@@ -59,6 +63,21 @@ class ParticipantController: ObservableObject {
         let payload: String
         var injectionStartRow: Int
     }
+
+    private struct PendingDelivery {
+        let id: UUID
+        let payload: String
+        let runID: String
+        let agentID: String
+        let relevantMessages: [GroupMessage]
+        let enqueuedAt: Date
+        var attemptCount: Int = 0
+        var lastAttemptAt: Date?
+        var lastFailureReason: String?
+    }
+
+    private static let retryBaseInterval: TimeInterval = 1.0
+    private static let retryMaxInterval: TimeInterval = 8.0
 
     let sessionID: UUID
     let groupSession: GroupChatSession
@@ -107,6 +126,11 @@ class ParticipantController: ObservableObject {
     private var postedTurnIDs = Set<UUID>()
     private var postedFingerprints = Set<String>()
 
+    /// Pending delivery waiting to be injected (capacity = 1, replaced by newer payloads).
+    private var pendingDelivery: PendingDelivery?
+    private var retryTimer: Timer?
+    private var lastLoggedRawOutput: String = ""
+
     private static func nextEventID() -> String {
         "evt_\(UUID().uuidString.lowercased())"
     }
@@ -153,6 +177,55 @@ class ParticipantController: ObservableObject {
         if debugEvents.count > 50 {
             debugEvents.removeFirst(debugEvents.count - 50)
         }
+    }
+
+    private func logLoopDecision(
+        category: String,
+        decision: String,
+        detail: String,
+        output: String? = nil,
+        metadata: [String: String] = [:]
+    ) {
+        logDebugEvent(.pollDecision, detail: "\(category):\(decision) \(detail)")
+        GroupChatDebugLogger.shared.log(
+            groupSession: groupSession,
+            participantSessionID: sessionID,
+            category: category,
+            decision: decision,
+            detail: detail,
+            output: output,
+            metadata: metadata
+        )
+    }
+
+    private func logBackendOutputDelta(_ rawOutput: String, runID: String, agentID: String) {
+        let delta: String
+        if rawOutput.hasPrefix(lastLoggedRawOutput) {
+            delta = String(rawOutput.dropFirst(lastLoggedRawOutput.count))
+        } else if lastLoggedRawOutput.hasPrefix(rawOutput) {
+            delta = ""
+        } else {
+            delta = rawOutput
+        }
+
+        if delta.isEmpty {
+            logLoopDecision(
+                category: "output_capture",
+                decision: "no_delta",
+                detail: "raw=\(rawOutput.count)",
+                metadata: ["run_id": runID, "agent_id": agentID]
+            )
+        } else {
+            logDebugEvent(.backendOutput, detail: "delta \(delta.count) chars")
+            logLoopDecision(
+                category: "backend_output",
+                decision: "delta",
+                detail: "chars=\(delta.count)",
+                output: delta,
+                metadata: ["run_id": runID, "agent_id": agentID]
+            )
+        }
+        lastLoggedRawOutput = rawOutput
     }
 
     private func agentIdentifier() -> String {
@@ -212,6 +285,11 @@ class ParticipantController: ObservableObject {
     func startObserving() {
         // Start from the current sequence so restored chats don't replay old turns.
         lastSeenSequence = groupSession.sequence
+        logLoopDecision(
+            category: "lifecycle",
+            decision: "start_observing",
+            detail: "last_seen=\(lastSeenSequence)"
+        )
 
         cliSession?.$state
             .receive(on: DispatchQueue.main)
@@ -224,6 +302,12 @@ class ParticipantController: ObservableObject {
                 } else {
                     self.waitingForInputSince = nil
                 }
+                self.logDebugEvent(.waitingForInput, detail: "state=\(state.rawValue)")
+                self.logLoopDecision(
+                    category: "session_state",
+                    decision: "state_update",
+                    detail: state.rawValue
+                )
             }
             .store(in: &cancellables)
 
@@ -248,10 +332,13 @@ class ParticipantController: ObservableObject {
 
     private func pollOutput() {
         guard isProcessing, isStableIdle else {
+            let reason = !isProcessing ? "not_processing" : "not_stable_idle"
+            logLoopDecision(category: "output_poll", decision: "skip", detail: reason)
             refreshDebugStatus(outputLoop: .idle)
             return
         }
 
+        logLoopDecision(category: "output_poll", decision: "run", detail: "capturing")
         refreshDebugStatus(outputLoop: .polling)
 
         captureAndPost()
@@ -270,10 +357,13 @@ class ParticipantController: ObservableObject {
 
     private func pollInput() {
         guard !isProcessing, isStableIdle else {
+            let reason = isProcessing ? "is_processing" : "not_stable_idle"
+            logLoopDecision(category: "input_poll", decision: "skip", detail: reason)
             refreshDebugStatus(inputLoop: .idle)
             return
         }
         logDebugEvent(.stableIdleReached, detail: "checking for messages")
+        logLoopDecision(category: "input_poll", decision: "run", detail: "stable_idle_reached")
         refreshDebugStatus(inputLoop: .polling)
         checkForNewMessages()
     }
@@ -284,6 +374,7 @@ class ParticipantController: ObservableObject {
     /// Called both from the idle observer and externally when the user sends a message.
     func checkForNewMessages() {
         guard !isProcessing else {
+            logLoopDecision(category: "check_messages", decision: "skip", detail: "already_processing")
             refreshDebugStatus(inputLoop: .idle)
             return
         }
@@ -300,14 +391,29 @@ class ParticipantController: ObservableObject {
             }
             return true // user and system messages are always relevant
         }
+        logLoopDecision(
+            category: "check_messages",
+            decision: "evaluated",
+            detail: "new=\(newMessages.count) relevant=\(relevantNew.count) seen=\(lastSeenSequence) seq=\(groupSession.sequence)"
+        )
 
         guard !relevantNew.isEmpty else {
             // No relevant messages, but advance cursor past non-relevant ones
             // (e.g. our own AI responses) to avoid re-checking them each poll.
             if !newMessages.isEmpty {
                 lastSeenSequence = groupSession.sequence
+                logLoopDecision(
+                    category: "check_messages",
+                    decision: "advance_cursor",
+                    detail: "self_only_messages seq=\(lastSeenSequence)"
+                )
             }
             logDebugEvent(.noNewMessages, detail: "seq \(groupSession.sequence), seen \(lastSeenSequence)")
+            logLoopDecision(
+                category: "check_messages",
+                decision: "no_relevant_messages",
+                detail: "idle"
+            )
             refreshDebugStatus(inputLoop: .idle)
             return
         }
@@ -325,7 +431,95 @@ class ParticipantController: ObservableObject {
             text: "Preparing prompt from \(relevantNew.count) new message(s)"
         )
         logDebugEvent(.messageInjected, detail: "\(relevantNew.count) msg(s), seq \(groupSession.sequence)")
+        logLoopDecision(
+            category: "delivery",
+            decision: "enqueue",
+            detail: "relevant=\(relevantNew.count) payload=\(payload.count)chars",
+            metadata: ["run_id": runID, "agent_id": agentID]
+        )
+        enqueueDelivery(payload: payload, runID: runID, agentID: agentID, relevantMessages: relevantNew)
+    }
+
+    // MARK: - Delivery Queue & Retry
+
+    private func enqueueDelivery(payload: String, runID: String, agentID: String, relevantMessages: [GroupMessage]) {
+        // Cancel any pending retry — the new payload supersedes it.
+        retryTimer?.invalidate()
+        retryTimer = nil
+
+        pendingDelivery = PendingDelivery(
+            id: UUID(),
+            payload: payload,
+            runID: runID,
+            agentID: agentID,
+            relevantMessages: relevantMessages,
+            enqueuedAt: Date()
+        )
+        attemptDelivery()
+    }
+
+    private func attemptDelivery() {
+        guard var delivery = pendingDelivery else { return }
+
+        delivery.attemptCount += 1
+        delivery.lastAttemptAt = Date()
+        pendingDelivery = delivery
+        logLoopDecision(
+            category: "delivery",
+            decision: "attempt",
+            detail: "attempt=\(delivery.attemptCount)",
+            metadata: ["run_id": delivery.runID, "agent_id": delivery.agentID]
+        )
+
+        guard TerminalViewCache.shared.terminalView(for: sessionID) != nil else {
+            delivery.lastFailureReason = "terminalView unavailable"
+            pendingDelivery = delivery
+            logDebugEvent(.deliveryFailed, detail: "terminal view unavailable")
+            logLoopDecision(
+                category: "delivery",
+                decision: "terminal_unavailable",
+                detail: "retry_scheduled",
+                metadata: ["run_id": delivery.runID, "agent_id": delivery.agentID]
+            )
+            scheduleRetry()
+            return
+        }
+
+        // Terminal is available — deliver now.
+        let payload = delivery.payload
+        let runID = delivery.runID
+        let agentID = delivery.agentID
+        pendingDelivery = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
+        logLoopDecision(
+            category: "delivery",
+            decision: "inject_now",
+            detail: "attempt=\(delivery.attemptCount)",
+            metadata: ["run_id": runID, "agent_id": agentID]
+        )
         injectPayload(payload, runID: runID, agentID: agentID)
+    }
+
+    private func scheduleRetry() {
+        guard let delivery = pendingDelivery else { return }
+        let exponential = Self.retryBaseInterval * pow(2.0, Double(max(0, delivery.attemptCount - 1)))
+        let delay = min(Self.retryMaxInterval, exponential)
+        logDebugEvent(.retryScheduled, detail: "attempt \(delivery.attemptCount), next in \(delay)s")
+        logLoopDecision(
+            category: "delivery_retry",
+            decision: "scheduled",
+            detail: "attempt=\(delivery.attemptCount) delay=\(delay)",
+            metadata: ["run_id": delivery.runID, "agent_id": delivery.agentID]
+        )
+        emitStatus(runID: delivery.runID, agentID: delivery.agentID, status: .queued, phaseText: "retry attempt \(delivery.attemptCount) in \(Int(delay))s")
+
+        retryTimer?.invalidate()
+        retryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.attemptDelivery()
+            }
+        }
     }
 
     // MARK: - Payload Construction
@@ -338,42 +532,37 @@ class ParticipantController: ObservableObject {
             .map { labels[$0] ?? "AI" }
         let historyPath = historyStore.historyFilePath(for: groupSession)
 
-        let inlineMessages = Self.formatMessagesForPayload(newMessages, labels: labels)
-
-        return """
-        [Group Chat] You are "\(myName)", participants: \(otherNames.joined(separator: ", ")). History: \(historyPath)
-        New messages since your last response:
-        \(inlineMessages)
-        Reply if you have something meaningful to contribute. If you have nothing to add, reply with exactly "[PASS]".
-        """
-    }
-
-    /// Formats messages inline so the AI sees content directly without reading a file.
-    private static func formatMessagesForPayload(_ messages: [GroupMessage], labels: [UUID: String]) -> String {
-        messages.map { msg in
-            let sender: String
-            switch msg.source {
-            case .user:
-                sender = "User"
-            case .ai(let name, let sid, _):
-                sender = labels[sid] ?? name
-            case .system:
-                sender = "System"
-            }
-            return "[\(sender)]: \(msg.content)"
-        }.joined(separator: "\n")
+        return GroupChatPromptConfig.shared.render(
+            myName: myName,
+            participants: otherNames.joined(separator: ", "),
+            historyPath: historyPath,
+            newMessageCount: newMessages.count
+        )
     }
 
     // MARK: - Inject & Capture
 
     private func injectPayload(_ payload: String, runID: String, agentID: String) {
-        guard let termView = TerminalViewCache.shared.terminalView(for: sessionID) else { return }
+        guard let termView = TerminalViewCache.shared.terminalView(for: sessionID) else {
+            // Re-enqueue for retry if not already pending (direct call from legacy path).
+            if pendingDelivery == nil {
+                enqueueDelivery(payload: payload, runID: runID, agentID: agentID, relevantMessages: [])
+            }
+            return
+        }
         let coordinator = TerminalViewCache.shared.coordinator(for: sessionID)
         let token = UUID()
         let startRow = termView.currentScrollInvariantRow()
 
         lastSeenSequence = groupSession.sequence
         isProcessing = true
+        lastLoggedRawOutput = ""
+        logLoopDecision(
+            category: "inject",
+            decision: "start",
+            detail: "payload=\(payload.count)chars row=\(startRow)",
+            metadata: ["run_id": runID, "agent_id": agentID]
+        )
         emitStatus(runID: runID, agentID: agentID, status: .running, phaseText: "injecting prompt")
         emitEphemeralMessage(runID: runID, agentID: agentID, kind: .action, text: "Prompt injected into terminal")
         activeTurn = TurnContext(
@@ -406,6 +595,12 @@ class ParticipantController: ObservableObject {
             // Record where to start reading the response buffer.
             self.activeTurn?.injectionStartRow = termView.currentScrollInvariantRow()
             self.emitStatus(runID: runID, agentID: agentID, status: .thinking, phaseText: "waiting for model output")
+            self.logLoopDecision(
+                category: "inject",
+                decision: "submitted",
+                detail: "enter_sent row=\(self.activeTurn?.injectionStartRow ?? -1)",
+                metadata: ["run_id": runID, "agent_id": agentID]
+            )
             self.refreshDebugStatus(inputLoop: .idle, outputLoop: .polling)
         }
     }
@@ -415,9 +610,23 @@ class ParticipantController: ObservableObject {
               let termView = TerminalViewCache.shared.terminalView(for: sessionID),
               let turn = activeTurn else {
             if let turn = activeTurn {
+                logLoopDecision(
+                    category: "output_capture",
+                    decision: "lost_handle",
+                    detail: "requeue_payload",
+                    metadata: ["run_id": turn.runID, "agent_id": turn.agentID]
+                )
                 emitStatus(runID: turn.runID, agentID: turn.agentID, status: .error, phaseText: "lost terminal/session handle")
+                // Re-enqueue the payload for retry instead of silently dropping.
+                let payload = turn.payload
+                let runID = turn.runID
+                let agentID = turn.agentID
+                clearActiveTurn(resetProcessing: true)
+                enqueueDelivery(payload: payload, runID: runID, agentID: agentID, relevantMessages: [])
+                return
             }
             isProcessing = false
+            logLoopDecision(category: "output_capture", decision: "skip", detail: "no_active_turn")
             refreshDebugStatus(outputLoop: .idle)
             return
         }
@@ -427,9 +636,22 @@ class ParticipantController: ObservableObject {
 
         // Read the terminal buffer from where injection output started.
         let rawOutput = termView.getBufferText(fromRow: turn.injectionStartRow, excludePromptLine: true)
+        logLoopDecision(
+            category: "output_capture",
+            decision: "read_buffer",
+            detail: "raw_chars=\(rawOutput.count) row=\(turn.injectionStartRow)",
+            metadata: ["run_id": turn.runID, "agent_id": turn.agentID]
+        )
+        logBackendOutputDelta(rawOutput, runID: turn.runID, agentID: turn.agentID)
 
         guard let content = Self.cleanGroupChatResponse(rawOutput, payload: turn.payload) else {
             // Empty content — do nothing; the next poll cycle will retry.
+            logLoopDecision(
+                category: "output_capture",
+                decision: "cleaned_empty",
+                detail: "wait_next_poll",
+                metadata: ["run_id": turn.runID, "agent_id": turn.agentID]
+            )
             refreshDebugStatus(outputLoop: .polling)
             return
         }
@@ -454,6 +676,12 @@ class ParticipantController: ObservableObject {
             consecutivePassCount += 1
             debugStatus.consecutivePassCount = consecutivePassCount
             logDebugEvent(.passDetected, detail: "consecutive #\(consecutivePassCount)")
+            logLoopDecision(
+                category: "output_capture",
+                decision: "pass_detected",
+                detail: "consecutive=\(consecutivePassCount)",
+                metadata: ["run_id": savedRunID, "agent_id": savedAgentID]
+            )
             onPassStateChanged?(sessionID, true)
             emitStatus(runID: savedRunID, agentID: savedAgentID, status: .done, phaseText: "PASS")
             // Remove the ephemeral run for PASS responses too.
@@ -471,6 +699,12 @@ class ParticipantController: ObservableObject {
         debugStatus.consecutivePassCount = 0
         onPassStateChanged?(sessionID, false)
         logDebugEvent(.outputCaptured, detail: "\(content.prefix(80))...")
+        logLoopDecision(
+            category: "output_capture",
+            decision: "post_message",
+            detail: "content_chars=\(content.count)",
+            metadata: ["run_id": savedRunID, "agent_id": savedAgentID]
+        )
 
         // Post the response back to the group
         let labels = sessionManager.map { groupSession.participantDisplayNames(sessionManager: $0) } ?? [:]
@@ -516,6 +750,12 @@ class ParticipantController: ObservableObject {
 
         // Persist history
         historyStore.save(groupSession)
+        logLoopDecision(
+            category: "output_capture",
+            decision: "persisted",
+            detail: "history_saved",
+            metadata: ["run_id": savedRunID, "agent_id": savedAgentID]
+        )
 
         refreshDebugStatus(outputLoop: .idle)
 
@@ -807,17 +1047,21 @@ class ParticipantController: ObservableObject {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
 
-        // If the entire content is just "[PASS]" or "PASS", it's a pass.
-        let lower = trimmed.lowercased()
-        if lower == "[pass]" || lower == "pass" { return true }
+        let keyword = GroupChatPromptConfig.shared.passKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Also match without brackets, e.g. "[PASS]" -> "pass"
+        let bare = keyword.replacingOccurrences(of: "[", with: "")
+            .replacingOccurrences(of: "]", with: "")
 
-        // Check the last non-empty line only — the AI's final verdict.
+        let lower = trimmed.lowercased()
+        if lower == keyword || lower == bare { return true }
+
         let lines = trimmed.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
         guard let lastLine = lines.last(where: { !$0.isEmpty }) else { return false }
         let lastLower = lastLine.lowercased()
-        return lastLower == "[pass]" || lastLower == "pass"
-            || lastLower.hasSuffix("[pass]") || lastLower.hasSuffix("pass]")
+        return lastLower == keyword || lastLower == bare
+            || lastLower.hasSuffix(keyword) || lastLower.hasSuffix(bare + "]")
     }
 
     // MARK: - User Control
@@ -825,9 +1069,14 @@ class ParticipantController: ObservableObject {
     /// Resets the controller for a new conversation round initiated by the user.
     /// Re-establishes observation so polling continues to work.
     func reset() {
+        logLoopDecision(category: "lifecycle", decision: "reset", detail: "controller reset")
         lastSeenSequence = groupSession.sequence
         clearActiveTurn(resetProcessing: true)
         waitingForInputSince = nil
+        pendingDelivery = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
+        lastLoggedRawOutput = ""
         postedTurnIDs.removeAll()
         postedFingerprints.removeAll()
         outputPollTimer?.invalidate()
@@ -840,15 +1089,36 @@ class ParticipantController: ObservableObject {
         startObserving()
     }
 
-    /// Stops all observation and processing.
+    /// Stops current processing only, while keeping polling alive.
     func stop() {
+        logLoopDecision(category: "lifecycle", decision: "stop", detail: "stop processing keep polling")
         clearActiveTurn(resetProcessing: true)
         waitingForInputSince = nil
+        pendingDelivery = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
+        lastLoggedRawOutput = ""
+        refreshDebugStatus(inputLoop: .idle, outputLoop: .idle)
+    }
+
+    /// Stops all observation and polling. This should only be used when closing the group chat.
+    func shutdown() {
+        logLoopDecision(category: "lifecycle", decision: "shutdown", detail: "stop polling and observing")
+        clearActiveTurn(resetProcessing: true)
+        waitingForInputSince = nil
+        pendingDelivery = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
+        lastLoggedRawOutput = ""
         outputPollTimer?.invalidate()
         outputPollTimer = nil
         inputPollTimer?.invalidate()
         inputPollTimer = nil
         cancellables.removeAll()
         refreshDebugStatus(inputLoop: .stopped, outputLoop: .stopped)
+    }
+
+    deinit {
+        shutdown()
     }
 }

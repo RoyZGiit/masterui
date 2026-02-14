@@ -35,8 +35,21 @@ struct SessionSidebarView: View {
     @State private var showNewGroupChatSheet = false
     @State private var closedSectionExpanded = true
 
+    private var groupChatSessionIDs: Set<UUID> {
+        var ids = Set<UUID>()
+        for chat in groupChatManager.groupChats {
+            for id in chat.participantSessionIDs {
+                ids.insert(id)
+            }
+        }
+        return ids
+    }
+
     private var sortedItems: [SidebarItem] {
-        let cliItems = sessionManager.sessions.map { (SidebarItem.cli($0.id), cliSortDate(for: $0)) }
+        let grouped = groupChatSessionIDs
+        let cliItems = sessionManager.sessions
+            .filter { !grouped.contains($0.id) }
+            .map { (SidebarItem.cli($0.id), cliSortDate(for: $0)) }
         let groupItems = groupChatManager.groupChats.map { (SidebarItem.group($0.id), groupSortDate(for: $0)) }
 
         return (cliItems + groupItems)
@@ -107,6 +120,8 @@ struct SessionSidebarView: View {
                                 if let chat = groupChatManager.groupChats.first(where: { $0.id == id }) {
                                     GroupChatRowView(
                                         chat: chat,
+                                        sessionManager: sessionManager,
+                                        groupChatManager: groupChatManager,
                                         isSelected: appState.viewMode == .groupChat && chat.id == groupChatManager.activeGroupChatID,
                                         onSelect: {
                                             appState.viewMode = .groupChat
@@ -247,6 +262,7 @@ struct SessionRowView: View {
     let onRename: (String) -> Void
     let onReload: () -> Void
     let onClose: () -> Void
+    var closeLabel: String = "Close Session"
     @State private var isHovering = false
     @State private var showRenameAlert = false
     @State private var renameDraft = ""
@@ -314,7 +330,7 @@ struct SessionRowView: View {
                 onReload()
             }
             Divider()
-            Button("Close Session", role: .destructive) {
+            Button(closeLabel, role: .destructive) {
                 onClose()
             }
         }
@@ -369,77 +385,160 @@ struct SessionRowView: View {
 
 struct GroupChatRowView: View {
     @ObservedObject var chat: GroupChatSession
+    @ObservedObject var sessionManager: CLISessionManager
+    @ObservedObject var groupChatManager: GroupChatManager
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
     @State private var isHovering = false
+    @State private var isExpanded = false
+    @State private var showNewParticipantSheet = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            // Icon
-            ZStack {
-                Circle()
-                    .fill(Color.purple.opacity(0.2))
-                    .frame(width: 24, height: 24)
-                Image(systemName: "person.3.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.purple)
-            }
-
-            // Chat info
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(chat.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-
-                    if chat.hasUnreadActivity {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 6, height: 6)
-                    }
-                }
-
-                Text("\(chat.participantSessionIDs.count) participants")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-
-            Spacer()
-
-            // Time
-            Text(chat.lastActivityDate, style: .relative)
-                .font(.system(size: 9))
-                .foregroundStyle(.quaternary)
-                .lineLimit(1)
-
-            // Close button on hover
-            if isHovering || isSelected {
-                Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+        VStack(spacing: 0) {
+            // Main group chat row
+            HStack(spacing: 8) {
+                // Expand arrow
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
                 .buttonStyle(.plain)
+                .frame(width: 12)
+
+                // Icon
+                ZStack {
+                    Circle()
+                        .fill(Color.purple.opacity(0.2))
+                        .frame(width: 24, height: 24)
+                    Image(systemName: "person.3.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.purple)
+                }
+
+                // Chat info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(chat.title)
+                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                            .lineLimit(1)
+
+                        if chat.hasUnreadActivity {
+                            Circle()
+                                .fill(Color.orange)
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+
+                    // Compact status summary
+                    Text(statusSummary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer()
+
+                // Time
+                Text(chat.lastActivityDate, style: .relative)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.quaternary)
+                    .lineLimit(1)
+
+                // Close button on hover
+                if isHovering || isSelected {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? Color.accentColor.opacity(0.12) :
+                          isHovering ? Color.primary.opacity(0.04) : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+            .onHover { hovering in isHovering = hovering }
+            .contextMenu {
+                Button("Close Group Chat", role: .destructive) { onClose() }
+            }
+
+            // Expanded child list
+            if isExpanded {
+                VStack(spacing: 1) {
+                    ForEach(chat.participantSessionIDs, id: \.self) { sessionID in
+                        if let session = sessionManager.sessions.first(where: { $0.id == sessionID }) {
+                            SessionRowView(
+                                session: session,
+                                isSelected: AppState.shared.viewMode == .cliSessions && session.id == sessionManager.focusedSessionID,
+                                onSelect: {
+                                    AppState.shared.viewMode = .cliSessions
+                                    sessionManager.focusSession(session.id)
+                                },
+                                onRename: { newName in
+                                    session.title = newName
+                                },
+                                onReload: {
+                                    // no-op for group child
+                                },
+                                onClose: {
+                                    _ = groupChatManager.removeParticipantSession(groupChatID: chat.id, sessionID: sessionID)
+                                },
+                                closeLabel: "Remove from Group"
+                            )
+                        }
+                    }
+
+                    // Add participant button
+                    Button { showNewParticipantSheet = true } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle")
+                                .font(.system(size: 10))
+                            Text("Add Session")
+                                .font(.system(size: 10))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.leading, 34)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.leading, 8)
+                .sheet(isPresented: $showNewParticipantSheet) {
+                    NewGroupParticipantSessionSheet(
+                        groupManager: groupChatManager,
+                        groupChat: chat,
+                        sessionManager: sessionManager,
+                        isPresented: $showNewParticipantSheet
+                    )
+                }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.accentColor.opacity(0.12) :
-                      isHovering ? Color.primary.opacity(0.04) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
-        .onHover { hovering in
-            isHovering = hovering
-        }
-        .contextMenu {
-            Button("Close Group Chat", role: .destructive) {
-                onClose()
+    }
+
+    private var statusSummary: String {
+        let activeCount = chat.participantSessionIDs.filter { id in
+            if let coordinator = groupChatManager.coordinator(for: chat.id),
+               let controller = coordinator.controllers[id] {
+                return controller.isProcessing
             }
+            return false
+        }.count
+        let total = chat.participantSessionIDs.count
+        if activeCount > 0 {
+            return "\(activeCount)/\(total) active"
         }
+        return "\(total) participants"
     }
 }
 

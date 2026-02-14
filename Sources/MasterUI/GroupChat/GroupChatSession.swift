@@ -4,6 +4,8 @@ import Combine
 enum GroupChatTab {
     case conversation
     case history
+    case settings
+    case debug
 }
 
 enum GroupChatAgentStatus: String, CaseIterable {

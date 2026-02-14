@@ -125,9 +125,12 @@ class SessionHistoryStore {
         dec.dateDecodingStrategy = .iso8601
         return dec
     }()
+    private let indexQueue = DispatchQueue(label: "com.masterui.sessionhistory.index")
+    private var closedSessionIndex: [UUID: ClosedSession] = [:]
 
     private init() {
         ensureDirectory()
+        rebuildClosedSessionIndex()
     }
 
     // MARK: - CRUD
@@ -137,6 +140,9 @@ class SessionHistoryStore {
         let url = fileURL(for: history.sessionID)
         if let data = try? encoder.encode(history) {
             try? data.write(to: url, options: .atomic)
+        }
+        indexQueue.sync {
+            closedSessionIndex[history.sessionID] = ClosedSession(from: history)
         }
     }
 
@@ -149,6 +155,9 @@ class SessionHistoryStore {
     func delete(sessionID: UUID) {
         let url = fileURL(for: sessionID)
         try? FileManager.default.removeItem(at: url)
+        indexQueue.sync {
+            closedSessionIndex.removeValue(forKey: sessionID)
+        }
     }
 
     func listAll() -> [SessionHistory] {
@@ -167,6 +176,14 @@ class SessionHistoryStore {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func listClosedSessions(excluding activeSessionIDs: Set<UUID>) -> [ClosedSession] {
+        indexQueue.sync {
+            closedSessionIndex.values
+                .filter { !activeSessionIDs.contains($0.id) }
+                .sorted { $0.updatedAt > $1.updatedAt }
+        }
+    }
+
     /// Returns the on-disk file path for a session's history JSON.
     func filePath(for sessionID: UUID) -> String {
         fileURL(for: sessionID).path
@@ -182,6 +199,64 @@ class SessionHistoryStore {
         let fm = FileManager.default
         if !fm.fileExists(atPath: historyDirectory.path) {
             try? fm.createDirectory(at: historyDirectory, withIntermediateDirectories: true)
+        }
+    }
+
+    private struct SessionBlockMetadata: Decodable {
+        let timestamp: Date
+    }
+
+    private struct LegacySessionTurnMetadata: Decodable {
+        let timestamp: Date
+    }
+
+    private struct SessionHistoryMetadataFile: Decodable {
+        let sessionID: UUID
+        let targetName: String
+        let workingDirectory: String?
+        let createdAt: Date
+        let updatedAt: Date
+        let blocks: [SessionBlockMetadata]?
+        let turns: [LegacySessionTurnMetadata]?
+        let customTitle: String?
+    }
+
+    private func rebuildClosedSessionIndex() {
+        ensureDirectory()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: historyDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return }
+
+        var refreshed: [UUID: ClosedSession] = [:]
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let metadata = try? decoder.decode(SessionHistoryMetadataFile.self, from: data) else {
+                continue
+            }
+
+            let blockCount: Int
+            if let blocks = metadata.blocks {
+                blockCount = blocks.count
+            } else if let turns = metadata.turns {
+                blockCount = turns.count * 2
+            } else {
+                blockCount = 0
+            }
+
+            refreshed[metadata.sessionID] = ClosedSession(
+                id: metadata.sessionID,
+                targetName: metadata.targetName,
+                customTitle: metadata.customTitle,
+                workingDirectory: metadata.workingDirectory,
+                createdAt: metadata.createdAt,
+                updatedAt: metadata.updatedAt,
+                blockCount: blockCount
+            )
+        }
+
+        indexQueue.sync {
+            closedSessionIndex = refreshed
         }
     }
 }
@@ -210,5 +285,23 @@ struct ClosedSession: Identifiable {
         self.createdAt = history.createdAt
         self.updatedAt = history.updatedAt
         self.blockCount = history.blocks.count
+    }
+
+    init(
+        id: UUID,
+        targetName: String,
+        customTitle: String?,
+        workingDirectory: String?,
+        createdAt: Date,
+        updatedAt: Date,
+        blockCount: Int
+    ) {
+        self.id = id
+        self.targetName = targetName
+        self.customTitle = customTitle
+        self.workingDirectory = workingDirectory
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.blockCount = blockCount
     }
 }

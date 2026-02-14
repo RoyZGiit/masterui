@@ -196,9 +196,7 @@ class CLISessionManager: ObservableObject {
 
     func refreshClosedSessions() {
         let activeIDs = Set(sessions.map { $0.id })
-        closedSessions = SessionHistoryStore.shared.listAll()
-            .filter { !activeIDs.contains($0.sessionID) }
-            .map { ClosedSession(from: $0) }
+        closedSessions = SessionHistoryStore.shared.listClosedSessions(excluding: activeIDs)
     }
 
     func permanentlyDeleteClosedSession(_ id: UUID) {

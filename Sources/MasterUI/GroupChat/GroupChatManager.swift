@@ -31,6 +31,7 @@ class GroupChatManager: ObservableObject {
     @Published var groupChats: [GroupChatSession] = []
     @Published var activeGroupChatID: UUID?
     @Published var closedGroupChats: [ClosedGroupChat] = []
+    var onStateChanged: (() -> Void)?
 
     private var coordinators: [UUID: GroupChatCoordinator] = [:]
     private var groupChatChangeCancellables: [UUID: AnyCancellable] = [:]
@@ -60,6 +61,7 @@ class GroupChatManager: ObservableObject {
         session.lastActivityDate = messages.last?.timestamp ?? createdAt
         session.hasUnreadActivity = false
         groupChats.append(session)
+        GroupChatHistoryStore.shared.save(session, synchronously: true)
         observeGroupChatChanges(session)
         activeGroupChatID = session.id
 
@@ -70,6 +72,7 @@ class GroupChatManager: ObservableObject {
         coordinator.setupControllers()
         coordinators[session.id] = coordinator
         refreshClosedGroupChats()
+        onStateChanged?()
 
         return session
     }
@@ -78,6 +81,7 @@ class GroupChatManager: ObservableObject {
         if let chat = groupChats.first(where: { $0.id == id }) {
             GroupChatHistoryStore.shared.save(chat)
         }
+        coordinators[id]?.shutdown()
         coordinators.removeValue(forKey: id)
         groupChatChangeCancellables[id] = nil
         groupChats.removeAll { $0.id == id }
@@ -85,10 +89,35 @@ class GroupChatManager: ObservableObject {
             activeGroupChatID = groupChats.first?.id
         }
         refreshClosedGroupChats()
+        onStateChanged?()
     }
 
     func coordinator(for groupChatID: UUID) -> GroupChatCoordinator? {
         coordinators[groupChatID]
+    }
+
+    @discardableResult
+    func addParticipantSession(
+        groupChatID: UUID,
+        sessionID: UUID
+    ) -> [UUID]? {
+        guard let chat = groupChats.first(where: { $0.id == groupChatID }) else { return nil }
+        chat.addParticipant(sessionID)
+        coordinators[groupChatID]?.syncControllersToParticipants()
+        GroupChatHistoryStore.shared.save(chat)
+        return chat.participantSessionIDs
+    }
+
+    @discardableResult
+    func removeParticipantSession(
+        groupChatID: UUID,
+        sessionID: UUID
+    ) -> [UUID]? {
+        guard let chat = groupChats.first(where: { $0.id == groupChatID }) else { return nil }
+        chat.removeParticipant(sessionID)
+        coordinators[groupChatID]?.syncControllersToParticipants()
+        GroupChatHistoryStore.shared.save(chat)
+        return chat.participantSessionIDs
     }
 
     func focusGroupChat(_ id: UUID) {
@@ -96,6 +125,7 @@ class GroupChatManager: ObservableObject {
         if let chat = groupChats.first(where: { $0.id == id }) {
             chat.hasUnreadActivity = false
         }
+        onStateChanged?()
     }
 
     // MARK: - Recycle Bin
@@ -115,7 +145,7 @@ class GroupChatManager: ObservableObject {
     func canRestoreClosedGroupChat(_ id: UUID, sessionManager: CLISessionManager) -> Bool {
         guard let history = GroupChatHistoryStore.shared.load(id: id) else { return false }
         let participantIDs = history.resolvedParticipantSessionIDs
-        guard participantIDs.count >= 2 else { return false }
+        guard !participantIDs.isEmpty else { return false }
 
         let activeSessionIDs = Set(sessionManager.sessions.map { $0.id })
         return participantIDs.allSatisfy { activeSessionIDs.contains($0) }
@@ -131,7 +161,7 @@ class GroupChatManager: ObservableObject {
 
         guard let history = GroupChatHistoryStore.shared.load(id: id) else { return false }
         let participantIDs = history.resolvedParticipantSessionIDs
-        guard participantIDs.count >= 2 else { return false }
+        guard !participantIDs.isEmpty else { return false }
 
         let activeSessionIDs = Set(sessionManager.sessions.map { $0.id })
         guard participantIDs.allSatisfy({ activeSessionIDs.contains($0) }) else { return false }

@@ -273,6 +273,7 @@ struct NewCLISessionSheet: View {
     @ObservedObject var sessionManager: CLISessionManager
     @ObservedObject private var appState = AppState.shared
     @Environment(\.dismiss) private var dismiss
+    var onCreated: ((CLISession) -> Void)? = nil
 
     @State private var selectedTarget: AITarget?
     @State private var selectedDirectoryURL: URL?
@@ -389,10 +390,12 @@ struct NewCLISessionSheet: View {
                 Spacer()
                 Button("Create") {
                     if let target = selectedTarget {
-                        sessionManager.createSession(
+                        let session = sessionManager.createSession(
                             for: target,
-                            workingDirectory: resolvedWorkingDirectory
+                            workingDirectory: resolvedWorkingDirectory,
+                            autoFocus: onCreated == nil
                         )
+                        onCreated?(session)
                     }
                     dismiss()
                 }

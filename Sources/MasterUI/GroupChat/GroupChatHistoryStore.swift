@@ -8,9 +8,52 @@ struct GroupChatHistoryFile: Codable {
     let title: String
     let participants: [String]
     var participantSessionIDs: [UUID]?
+    var participantSessionID: UUID?
     let createdAt: Date?
     let updatedAt: Date?
     var messages: [GroupMessage]
+
+    enum CodingKeys: String, CodingKey {
+        case chatID
+        case title
+        case participants
+        case participantSessionIDs
+        case participantSessionID
+        case createdAt
+        case updatedAt
+        case messages
+    }
+
+    init(
+        chatID: UUID,
+        title: String,
+        participants: [String],
+        participantSessionIDs: [UUID]?,
+        createdAt: Date?,
+        updatedAt: Date?,
+        messages: [GroupMessage]
+    ) {
+        self.chatID = chatID
+        self.title = title
+        self.participants = participants
+        self.participantSessionIDs = participantSessionIDs
+        self.participantSessionID = nil
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.messages = messages
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chatID = try container.decode(UUID.self, forKey: .chatID)
+        title = try container.decode(String.self, forKey: .title)
+        participants = try container.decodeIfPresent([String].self, forKey: .participants) ?? []
+        participantSessionIDs = try container.decodeIfPresent([UUID].self, forKey: .participantSessionIDs)
+        participantSessionID = try container.decodeIfPresent(UUID.self, forKey: .participantSessionID)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)
+        messages = try container.decodeIfPresent([GroupMessage].self, forKey: .messages) ?? []
+    }
 
     var resolvedCreatedAt: Date {
         createdAt ?? messages.first?.timestamp ?? Date()
@@ -21,7 +64,13 @@ struct GroupChatHistoryFile: Codable {
     }
 
     var resolvedParticipantSessionIDs: [UUID] {
-        participantSessionIDs ?? []
+        if let ids = participantSessionIDs {
+            return ids
+        }
+        if let legacy = participantSessionID {
+            return [legacy]
+        }
+        return []
     }
 }
 
@@ -59,10 +108,18 @@ class GroupChatHistoryStore {
             .path
     }
 
+    /// Returns the file path for a given group chat session's debug log.
+    func debugLogFilePath(for session: GroupChatSession) -> String {
+        Self.groupChatDirectory
+            .appendingPathComponent("\(session.id.uuidString).debug.log")
+            .path
+    }
+
     /// Saves the group chat session to a JSON file.
-    /// Encoding happens on the calling thread; the file write is dispatched
-    /// to a serial queue to prevent concurrent overlapping writes.
-    func save(_ session: GroupChatSession) {
+    /// Encoding happens on the calling thread.
+    /// By default writes are queued on a serial queue; pass `synchronously: true`
+    /// when a durable write is required before process exit.
+    func save(_ session: GroupChatSession, synchronously: Bool = false) {
         let participantNames = session.messages.reduce(into: Set<String>()) { names, msg in
             if case .ai(let name, _, _) = msg.source {
                 names.insert(name)
@@ -84,9 +141,14 @@ class GroupChatHistoryStore {
         let url = Self.groupChatDirectory
             .appendingPathComponent("\(session.id.uuidString).json")
 
-        writeQueue.async { [self] in
-            ensureDirectory()
+        let writeBlock = { [self] in
+            self.ensureDirectory()
             try? data.write(to: url, options: .atomic)
+        }
+        if synchronously {
+            writeBlock()
+        } else {
+            writeQueue.async(execute: writeBlock)
         }
     }
 
