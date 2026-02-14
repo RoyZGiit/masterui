@@ -128,6 +128,8 @@ class ParticipantController: ObservableObject {
 
     /// Pending delivery waiting to be injected (capacity = 1, replaced by newer payloads).
     private var pendingDelivery: PendingDelivery?
+    /// Latest group sequence announced by coordinator fan-out.
+    private var pendingFanoutSequence: Int?
     private var retryTimer: Timer?
     private var lastLoggedRawOutput: String = ""
 
@@ -308,6 +310,7 @@ class ParticipantController: ObservableObject {
                     decision: "state_update",
                     detail: state.rawValue
                 )
+                self.drainPendingFanoutIfReady(forceStableIdle: false)
             }
             .store(in: &cancellables)
 
@@ -356,6 +359,8 @@ class ParticipantController: ObservableObject {
     }
 
     private func pollInput() {
+        drainPendingFanoutIfReady(forceStableIdle: true)
+
         guard !isProcessing, isStableIdle else {
             let reason = isProcessing ? "is_processing" : "not_stable_idle"
             logLoopDecision(category: "input_poll", decision: "skip", detail: reason)
@@ -438,6 +443,17 @@ class ParticipantController: ObservableObject {
             metadata: ["run_id": runID, "agent_id": agentID]
         )
         enqueueDelivery(payload: payload, runID: runID, agentID: agentID, relevantMessages: relevantNew)
+    }
+
+    /// Called by GroupChatCoordinator for chat-level fan-out delivery.
+    /// If this participant is busy, the signal is queued and replayed once it is stably idle.
+    func deliverMessage(sequence: Int) {
+        if let existing = pendingFanoutSequence {
+            pendingFanoutSequence = max(existing, sequence)
+        } else {
+            pendingFanoutSequence = sequence
+        }
+        drainPendingFanoutIfReady(forceStableIdle: false)
     }
 
     // MARK: - Delivery Queue & Retry
@@ -765,6 +781,7 @@ class ParticipantController: ObservableObject {
         // in checkForNewMessages() will skip our own response (same sessionID),
         // and any messages from others will be properly picked up.
         checkForNewMessages()
+        drainPendingFanoutIfReady(forceStableIdle: false)
     }
 
     private func clearActiveTurn(resetProcessing: Bool) {
@@ -772,6 +789,24 @@ class ParticipantController: ObservableObject {
         if resetProcessing {
             isProcessing = false
         }
+    }
+
+    private func drainPendingFanoutIfReady(forceStableIdle: Bool) {
+        guard let pending = pendingFanoutSequence else { return }
+        guard !isProcessing else { return }
+        if forceStableIdle && !isStableIdle {
+            return
+        }
+        if !forceStableIdle, !(cliSession?.state == .waitingForInput || isStableIdle) {
+            return
+        }
+        pendingFanoutSequence = nil
+        logLoopDecision(
+            category: "fanout_delivery",
+            decision: "drain",
+            detail: "pending_seq=\(pending) seen=\(lastSeenSequence) current=\(groupSession.sequence)"
+        )
+        checkForNewMessages()
     }
 
     // MARK: - Response Cleaning

@@ -22,6 +22,16 @@ struct ClosedGroupChat: Identifiable {
         self.updatedAt = file.resolvedUpdatedAt
         self.messageCount = file.messages.count
     }
+
+    init(from metadata: GroupChatHistoryMetadata) {
+        self.id = metadata.chatID
+        self.title = metadata.title
+        self.participants = metadata.participants
+        self.participantSessionIDs = metadata.participantSessionIDs
+        self.createdAt = metadata.createdAt
+        self.updatedAt = metadata.updatedAt
+        self.messageCount = metadata.messageCount
+    }
 }
 
 // MARK: - GroupChatManager
@@ -105,6 +115,7 @@ class GroupChatManager: ObservableObject {
         chat.addParticipant(sessionID)
         coordinators[groupChatID]?.syncControllersToParticipants()
         GroupChatHistoryStore.shared.save(chat)
+        onStateChanged?()
         return chat.participantSessionIDs
     }
 
@@ -117,6 +128,7 @@ class GroupChatManager: ObservableObject {
         chat.removeParticipant(sessionID)
         coordinators[groupChatID]?.syncControllersToParticipants()
         GroupChatHistoryStore.shared.save(chat)
+        onStateChanged?()
         return chat.participantSessionIDs
     }
 
@@ -132,7 +144,7 @@ class GroupChatManager: ObservableObject {
 
     func refreshClosedGroupChats() {
         let activeIDs = Set(groupChats.map { $0.id })
-        closedGroupChats = GroupChatHistoryStore.shared.listAll()
+        closedGroupChats = GroupChatHistoryStore.shared.listAllMetadata()
             .filter { !activeIDs.contains($0.chatID) }
             .map { ClosedGroupChat(from: $0) }
     }

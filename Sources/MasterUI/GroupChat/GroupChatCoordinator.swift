@@ -93,12 +93,16 @@ class GroupChatCoordinator: ObservableObject {
         messageCancellable = groupSession.messagePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] event in
-                self?.handleNewMessage(event)
+                guard let self else { return }
+                self.deliverMessage(chatID: self.groupSession.id, event: event)
             }
     }
 
-    /// Notifies idle controllers (except the poster) that a new message arrived.
-    private func handleNewMessage(_ event: GroupChatSession.MessageEvent) {
+    /// Fan-out delivery for a newly appended group chat message.
+    /// Every participant (except the poster) receives a delivery signal for this chat.
+    private func deliverMessage(chatID: UUID, event: GroupChatSession.MessageEvent) {
+        guard chatID == groupSession.id else { return }
+
         // Determine which session posted so we can skip it.
         let posterSessionID: UUID?
         if case .ai(_, let sid, _) = event.message.source {
@@ -109,9 +113,7 @@ class GroupChatCoordinator: ObservableObject {
 
         for (sessionID, controller) in controllers {
             guard sessionID != posterSessionID else { continue }
-            guard !controller.isProcessing else { continue }
-            guard controller.cliSession?.state == .waitingForInput else { continue }
-            controller.checkForNewMessages()
+            controller.deliverMessage(sequence: event.sequence)
         }
     }
 

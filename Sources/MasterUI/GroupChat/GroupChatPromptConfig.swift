@@ -31,10 +31,10 @@ final class GroupChatPromptConfig: ObservableObject {
 
     static let defaultPromptTemplate = """
     [Group Chat] You are "{{MY_NAME}}", participants: {{PARTICIPANTS}}. History: {{HISTORY_PATH}}
-    New activity count since your last turn: {{NEW_MESSAGE_COUNT}}
-    Read the history file above, then decide whether you should reply in this round.
     Do not ask for pasted messages. Use the history file as the only source of latest conversation updates.
-    Reply if you have something meaningful to contribute. If you have nothing to add, reply with exactly "[PASS]".
+    If you have nothing to add, reply with exactly "[PASS]".
+    Use @xxx in the message means this message is just for xxx,reply with exactly "[PASS]" if xxx is not you.
+    If you know what to do, there is no need to reply anything, just do it.
     """
 
     static let defaultPassKeyword = "[PASS]"

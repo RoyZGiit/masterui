@@ -156,7 +156,7 @@ class SessionHistoryStore {
         let url = fileURL(for: sessionID)
         try? FileManager.default.removeItem(at: url)
         indexQueue.sync {
-            closedSessionIndex.removeValue(forKey: sessionID)
+            _ = closedSessionIndex.removeValue(forKey: sessionID)
         }
     }
 
